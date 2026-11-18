@@ -10,9 +10,17 @@ import type {
 import { FINGER_SPECS } from './handKinematics';
 import {
   computeContainBox,
+  getZoneHandles,
   getZonePixelGeometry,
   type ViewportBox,
 } from './triggerZones';
+
+export interface DraftZoneBox {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
 
 export interface RenderOverlayOptions {
   mirrored: boolean;
@@ -22,6 +30,8 @@ export interface RenderOverlayOptions {
   showTriggers: boolean;
   editTriggers: boolean;
   selectedTriggerId: string | null;
+  hoveredTriggerId: string | null;
+  draftZone: DraftZoneBox | null;
   videoAspect: number;
 }
 
@@ -132,15 +142,30 @@ function drawTriggerZones(
 
     const geom = getZonePixelGeometry(zone, box);
     const isSelected = options.editTriggers && zone.id === options.selectedTriggerId;
-    const fillAlpha = !zone.enabled ? 0.04 : ev.active ? 0.34 : ev.inside ? 0.2 : 0.1;
-    const strokeAlpha = !zone.enabled ? 0.3 : ev.active ? 0.98 : isSelected ? 0.95 : 0.65;
+    const isHovered = options.editTriggers && zone.id === options.hoveredTriggerId;
+    const fillAlpha = !zone.enabled
+      ? 0.04
+      : ev.active
+        ? 0.34
+        : ev.inside
+          ? 0.2
+          : isHovered
+            ? 0.16
+            : 0.1;
+    const strokeAlpha = !zone.enabled
+      ? 0.3
+      : ev.active
+        ? 0.98
+        : isSelected || isHovered
+          ? 0.98
+          : 0.65;
 
     ctx.save();
     ctx.fillStyle = hexToRgba(zone.color, fillAlpha);
     ctx.strokeStyle = hexToRgba(zone.color, strokeAlpha);
-    ctx.lineWidth = ev.active ? 2.8 : isSelected ? 2.4 : 1.6;
+    ctx.lineWidth = ev.active ? 2.8 : isSelected ? 2.4 : isHovered ? 2.0 : 1.5;
 
-    if (options.editTriggers && !ev.active) {
+    if (options.editTriggers && !ev.active && !isSelected) {
       ctx.setLineDash([6, 4]);
     }
 
@@ -201,24 +226,56 @@ function drawTriggerZones(
       ctx.stroke();
     }
 
-    // Manijas de edición (arrastrar centro + redimensionar esquina)
-    if (options.editTriggers) {
+    // Manijas de edición (8 en rectángulo, 4 en círculo cuando seleccionado o hover)
+    if (options.editTriggers && (isSelected || isHovered)) {
       ctx.fillStyle = isSelected ? '#ffffff' : zone.color;
       ctx.beginPath();
-      ctx.arc(geom.cx, geom.cy, 4, 0, Math.PI * 2);
+      ctx.arc(geom.cx, geom.cy, 3.5, 0, Math.PI * 2);
       ctx.fill();
 
-      const handleX = zone.shape === 'circle' ? geom.cx + geom.radius : geom.left + geom.w;
-      const handleY = zone.shape === 'circle' ? geom.cy : geom.top + geom.h;
-      ctx.fillStyle = '#0b0e13';
-      ctx.strokeStyle = isSelected ? '#ffffff' : zone.color;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.rect(handleX - 6, handleY - 6, 12, 12);
-      ctx.fill();
-      ctx.stroke();
+      const handles = getZoneHandles(zone, box);
+      for (const h of handles) {
+        ctx.fillStyle = '#0b0e13';
+        ctx.strokeStyle = isSelected ? '#ffffff' : zone.color;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.rect(h.x - 5, h.y - 5, 10, 10);
+        ctx.fill();
+        ctx.stroke();
+      }
+    } else if (options.editTriggers) {
+      // Marca sutil en esquina inferior derecha para indicar que todas son arrastrables
+      const se = getZoneHandles(zone, box).find((h) => h.id === 'se' || h.id === 'e');
+      if (se) {
+        ctx.fillStyle = '#0b0e13';
+        ctx.strokeStyle = hexToRgba(zone.color, 0.75);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.rect(se.x - 4, se.y - 4, 8, 8);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
 
+    ctx.restore();
+  }
+
+  // Vista previa al dibujar una nueva zona directamente con el mouse
+  if (options.draftZone) {
+    const left = box.x + Math.min(options.draftZone.x1, options.draftZone.x2) * box.w;
+    const top = box.y + Math.min(options.draftZone.y1, options.draftZone.y2) * box.h;
+    const w = Math.abs(options.draftZone.x2 - options.draftZone.x1) * box.w;
+    const h = Math.abs(options.draftZone.y2 - options.draftZone.y1) * box.h;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(34, 211, 238, 0.16)';
+    ctx.strokeStyle = '#22d3ee';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.roundRect(left, top, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
     ctx.restore();
   }
 }

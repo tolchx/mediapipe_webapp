@@ -13,6 +13,8 @@ export class OscBridgeClient {
   private reconnectTimer: number | null = null;
   private disposed = false;
   private lastSentAt = 0;
+  private autoReconnect = true;
+  private activeWsUrl: string | null = null;
 
   private config: OscConfig = {
     enabled: true,
@@ -32,6 +34,7 @@ export class OscBridgeClient {
   };
 
   private stats: OscStats = {
+    bridgeMode: 'connecting',
     wsConnected: false,
     udpReady: false,
     targetHost: '127.0.0.1',
@@ -49,18 +52,107 @@ export class OscBridgeClient {
   private onLoopbackListeners: Array<(res: LoopbackTestResult) => void> = [];
   private onTestPacketListeners: Array<(info: { host: string; port: number; count: number }) => void> = [];
 
-  connect(): void {
+  connect(customWsUrl?: string): void {
     if (this.disposed) return;
+
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (customWsUrl) {
+      const cleaned = customWsUrl.trim();
+      if (!cleaned) return;
+      this.autoReconnect = false;
+      this.activeWsUrl = cleaned;
+      this.closeCurrentSocket();
+      this.stats.bridgeMode = 'connecting';
+      this.stats.lastError = null;
+      this.emitStats();
+      this.openWebSocket(cleaned);
+      return;
+    }
+
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
+    void this.probeAndConnectSameOrigin();
+  }
+
+  private closeCurrentSocket(): void {
+    if (!this.ws) return;
+    const prev = this.ws;
+    this.ws = null;
+    try {
+      prev.close();
+    } catch {
+      // ignore close errors
+    }
+  }
+
+  private async probeAndConnectSameOrigin(): Promise<void> {
+    if (this.disposed) return;
+
+    const baseUrl = new URL(import.meta.env.BASE_URL || './', window.location.href);
+    const healthUrl = new URL('api/health', baseUrl).href;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 2000);
+
+    let hasSameOriginBridge = false;
+    try {
+      const res = await fetch(healthUrl, { cache: 'no-store', signal: controller.signal });
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = (await res.json()) as { ok?: unknown; udpReady?: unknown };
+        hasSameOriginBridge = data?.ok === true && typeof data?.udpReady === 'boolean';
+      }
+    } catch {
+      hasSameOriginBridge = false;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (this.disposed) return;
+
+    if (!hasSameOriginBridge) {
+      this.autoReconnect = false;
+      this.stats.bridgeMode = 'standalone';
+      this.stats.wsConnected = false;
+      this.stats.udpReady = false;
+      this.stats.lastError = null;
+      this.emitStats();
+      return;
+    }
+
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/osc`;
-    const ws = new WebSocket(url);
+    const wsUrl = `${proto}//${window.location.host}/osc`;
+    this.autoReconnect = true;
+    this.activeWsUrl = wsUrl;
+    this.openWebSocket(wsUrl);
+  }
+
+  private openWebSocket(url: string): void {
+    if (this.disposed) return;
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url);
+    } catch (err) {
+      this.stats.wsConnected = false;
+      this.stats.bridgeMode = this.autoReconnect ? 'disconnected' : 'standalone';
+      this.stats.lastError = err instanceof Error ? err.message : String(err);
+      this.emitStats();
+      return;
+    }
+
     this.ws = ws;
+    let opened = false;
 
     ws.addEventListener('open', () => {
+      if (this.ws !== ws) return;
+      opened = true;
+      this.stats.bridgeMode = 'connected';
       this.stats.wsConnected = true;
       this.stats.lastError = null;
       this.pushConfigToServer();
@@ -68,11 +160,13 @@ export class OscBridgeClient {
     });
 
     ws.addEventListener('message', (event) => {
+      if (this.ws !== ws) return;
       try {
         const data = JSON.parse(String(event.data));
         if (data.type === 'stats') {
           this.stats = {
             ...this.stats,
+            bridgeMode: 'connected',
             wsConnected: true,
             udpReady: Boolean(data.udpReady),
             targetHost: data.targetHost ?? this.stats.targetHost,
@@ -100,22 +194,37 @@ export class OscBridgeClient {
     });
 
     ws.addEventListener('close', () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.stats.wsConnected = false;
-      this.emitStats();
-      this.scheduleReconnect();
+      if (this.autoReconnect && !this.disposed) {
+        this.stats.bridgeMode = 'disconnected';
+        this.emitStats();
+        this.scheduleReconnect();
+      } else {
+        this.stats.bridgeMode = 'standalone';
+        if (!opened && !this.stats.lastError) {
+          this.stats.lastError = 'No se pudo conectar al puente WebSocket local';
+        }
+        this.emitStats();
+      }
     });
 
     ws.addEventListener('error', () => {
+      if (this.ws !== ws) return;
       this.stats.wsConnected = false;
+      if (!this.autoReconnect) {
+        this.stats.lastError = `No se encontró puente WebSocket en ${url}`;
+      }
       this.emitStats();
     });
   }
 
   private scheduleReconnect(): void {
-    if (this.disposed || this.reconnectTimer !== null) return;
+    if (this.disposed || !this.autoReconnect || this.reconnectTimer !== null) return;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
+      if (this.activeWsUrl) this.openWebSocket(this.activeWsUrl);
     }, 1500);
   }
 
@@ -168,14 +277,16 @@ export class OscBridgeClient {
     return true;
   }
 
-  sendTestPacket(): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  sendTestPacket(): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.ws.send(JSON.stringify({ type: 'send_test_packet' }));
+    return true;
   }
 
-  runLoopbackTest(): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  runLoopbackTest(): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.ws.send(JSON.stringify({ type: 'loopback_test' }));
+    return true;
   }
 
   onStats(cb: (stats: OscStats) => void): void {

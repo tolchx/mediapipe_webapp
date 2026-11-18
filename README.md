@@ -19,7 +19,7 @@ Aplicación web en tiempo real para rastrear **manos, dedos y cada falange indiv
 
 - **Sistema de Pulsadores / Zonas Interactivas OSC para TouchDesigner (`Pulsadores (TD)`)**
   - Crea áreas rectangulares o circulares sobre el visor de cámara y edita su **posición (`X, Y`)**, **tamaño (`Ancho/Alto` o `Diámetro`)**, **dirección OSC personalizada** (ej. `/td/pad/1`), color y filtro de mano (`Cualquiera`, `Derecha`, `Izquierda`).
-  - Soporta **edición directa con mouse sobre el video** (`Editar Áreas`: arrastrar para mover, manija de esquina para redimensionar y doble clic para crear un nuevo pulsador).
+  - **Edición directa con el cursor sobre el video** (`Edición Mouse: ON` por defecto, bloqueable con un clic): arrastra una zona para moverla, usa cualquiera de sus **8 manijas** (esquinas y bordes en rectángulo; 4 manijas en círculo) o la **rueda del mouse** para cambiar tamaño, arrastra sobre un espacio vacío o haz **doble clic** para dibujar un nuevo pulsador, edita su dirección OSC/modo/forma desde la barra flotante sobre el visor y mueve/elimina con las flechas o `Supr`.
   - **3 tipos de trigger** con anti-rebote (*cooldown*):
     - **Pulso (`pulse`)**: dispara `1` durante una duración configurable (`40–1000 ms`) al ingresar al área y vuelve a `0`.
     - **Mantener (`momentary`)**: mantiene `1` mientras la mano o dedo permanezca dentro del área y vuelve a `0` al salir.
@@ -93,6 +93,13 @@ Variables de entorno opcionales para el servidor (`server/index.mjs`):
 - `PORT` (por defecto `3000`)
 - `OSC_HOST` (por defecto `127.0.0.1`)
 - `OSC_PORT` (por defecto `9000`)
+
+### Despliegue estático / Modo Web y Puente Local Opcional
+
+La compilación (`npm run build`) genera activos con rutas relativas (`base: './'` en [vite.config.ts](vite.config.ts)) e incluye [public/.htaccess](public/.htaccess) (MIME types `.wasm` / `.task`, `Permissions-Policy: camera=(self)`, CSP con soporte `wasm-unsafe-eval` y enrutamiento para subdirectorio `/mediapipeweb/`).
+
+- Si la webapp se sirve desde un hosting estático sin backend Node.js en el mismo origen, entra automáticamente en **Modo Web (Monitor local)** sin errores de reconexión: el tracking de MediaPipe, los pulsadores y el sintetizador Web Audio funcionan 100% en el navegador.
+- Desde la pestaña **Protocolo OSC**, puedes indicar la URL de un puente WebSocket local (por defecto `ws://127.0.0.1:3000/osc`) y pulsar **Conectar Puente** si deseas reenviar paquetes OSC UDP hacia TouchDesigner en tu máquina local mientras usas la versión web alojada online.
 
 ---
 
@@ -169,6 +176,22 @@ Por cada pulsador habilitado (con su dirección configurable `{oscAddress}`, por
 
 ---
 
+## Edición directa de Pulsadores con el mouse
+
+Con `Edición Mouse: ON` activo en la barra del visor (activado por defecto; pulsa de nuevo para pasar a `Edición Bloqueada` durante presentaciones en vivo):
+
+| Acción | Comportamiento |
+| :--- | :--- |
+| **Arrastrar el área** | Mueve la posición `(X, Y)` del pulsador sobre la cámara |
+| **Arrastrar manijas (8 en rect / 4 en círculo)** | Redimensiona manteniendo el borde opuesto anclado (`Alt + arrastrar` escala simétricamente desde el centro) |
+| **Rueda del mouse sobre un área** | Escala rápidamente el tamaño de la zona |
+| **Arrastrar sobre espacio vacío** | Dibuja y crea un nuevo pulsador con ese tamaño y posición |
+| **Doble clic sobre espacio vacío** | Crea un nuevo pulsador centrado en el cursor |
+| **Barra flotante sobre la zona** | Permite editar dirección OSC, ciclar `Pulso / Mantener / Toggle`, alternar `Rect / Círculo`, elegir detector, duplicar (`⧉`) o eliminar (`✕`) |
+| **Flechas / `Shift + Flechas` / `Supr`** | Mueve la zona seleccionada en pasos finos o amplios, o la elimina |
+
+---
+
 ## Estructura del proyecto
 
 ```text
@@ -176,7 +199,9 @@ mediapipe_webapp/
 ├── index.html                  # Interfaz principal de la aplicación
 ├── package.json                # Scripts y dependencias
 ├── tsconfig.json               # Configuración estricta de TypeScript
-├── vite.config.ts              # Configuración Vite y proxy WebSocket /osc
+├── vite.config.ts              # Configuración Vite (base: './') y proxy WebSocket /osc
+├── public/
+│   └── .htaccess               # Cabeceras Apache, MIME WASM/task y SPA /mediapipeweb/
 ├── instalar.bat                # Instalador doble clic para Windows
 ├── abrir_webapp.bat            # Lanzador doble clic para Windows
 ├── instalar_mac.command        # Instalador doble clic para macOS

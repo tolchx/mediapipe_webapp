@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TriggerZoneEngine, hitTestZoneNormalized } from '../src/vision/triggerZones.ts';
+import {
+  TriggerZoneEngine,
+  getZoneHandles,
+  hitTestZoneNormalized,
+} from '../src/vision/triggerZones.ts';
 import { buildOscMessages } from '../src/osc/oscProtocol.ts';
 
 function makeMockFrame(timestamp, indexTipX, indexTipY, side = 'right', pinchActive = false) {
@@ -88,9 +92,11 @@ test('TriggerZoneEngine handles pulse, momentary, and toggle modes with rect and
     oscAddress: '/td/pad/toggle',
   });
 
-  // Check circle geometry symmetry
+  // Check circle geometry symmetry & handles
   assert.equal(hitTestZoneNormalized(holdPad, 0.7, 0.5, 16 / 9).inside, true);
   assert.equal(hitTestZoneNormalized(holdPad, 0.7, 0.7, 16 / 9).inside, false);
+  assert.equal(getZoneHandles(pulsePad, { x: 0, y: 0, w: 1280, h: 720 }).length, 8);
+  assert.equal(getZoneHandles(holdPad, { x: 0, y: 0, w: 1280, h: 720 }).length, 4);
 
   // Frame 1: outside all zones
   let res = engine.evaluate(makeMockFrame(1000, 0.05, 0.05), false, 16 / 9);

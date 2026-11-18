@@ -25,6 +25,39 @@ export interface ZonePixelGeometry {
   radius: number;
 }
 
+export type ZoneHandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+export interface ZoneHandle {
+  id: ZoneHandleId;
+  x: number;
+  y: number;
+  cursor: string;
+}
+
+export function getZoneHandles(zone: TriggerZone, box: ViewportBox): ZoneHandle[] {
+  const g = getZonePixelGeometry(zone, box);
+  const right = g.left + g.w;
+  const bottom = g.top + g.h;
+  if (zone.shape === 'circle') {
+    return [
+      { id: 'n', x: g.cx, y: g.cy - g.radius, cursor: 'ns-resize' },
+      { id: 'e', x: g.cx + g.radius, y: g.cy, cursor: 'ew-resize' },
+      { id: 's', x: g.cx, y: g.cy + g.radius, cursor: 'ns-resize' },
+      { id: 'w', x: g.cx - g.radius, y: g.cy, cursor: 'ew-resize' },
+    ];
+  }
+  return [
+    { id: 'nw', x: g.left, y: g.top, cursor: 'nwse-resize' },
+    { id: 'n', x: g.cx, y: g.top, cursor: 'ns-resize' },
+    { id: 'ne', x: right, y: g.top, cursor: 'nesw-resize' },
+    { id: 'e', x: right, y: g.cy, cursor: 'ew-resize' },
+    { id: 'se', x: right, y: bottom, cursor: 'nwse-resize' },
+    { id: 's', x: g.cx, y: bottom, cursor: 'ns-resize' },
+    { id: 'sw', x: g.left, y: bottom, cursor: 'nesw-resize' },
+    { id: 'w', x: g.left, y: g.cy, cursor: 'ew-resize' },
+  ];
+}
+
 const STORAGE_KEY = 'hand_osc_trigger_zones_v1';
 
 export const TRIGGER_COLORS = [
@@ -290,10 +323,10 @@ export class TriggerZoneEngine {
     const next: TriggerZone = {
       ...prev,
       ...partial,
-      x: Math.max(0.03, Math.min(0.97, partial.x ?? prev.x)),
-      y: Math.max(0.03, Math.min(0.97, partial.y ?? prev.y)),
-      width: Math.max(0.05, Math.min(0.92, partial.width ?? prev.width)),
-      height: Math.max(0.05, Math.min(0.92, partial.height ?? prev.height)),
+      x: Math.max(0.02, Math.min(0.98, partial.x ?? prev.x)),
+      y: Math.max(0.02, Math.min(0.98, partial.y ?? prev.y)),
+      width: Math.max(0.04, Math.min(0.96, partial.width ?? prev.width)),
+      height: Math.max(0.04, Math.min(0.96, partial.height ?? prev.height)),
       pulseDurationMs: Math.max(40, Math.min(2000, partial.pulseDurationMs ?? prev.pulseDurationMs)),
       cooldownMs: Math.max(0, Math.min(2000, partial.cooldownMs ?? prev.cooldownMs)),
     };

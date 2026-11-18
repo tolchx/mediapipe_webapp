@@ -211,6 +211,7 @@ export interface OscMessageItem {
 }
 
 export interface OscStats {
+  bridgeMode: 'connecting' | 'connected' | 'standalone' | 'disconnected';
   wsConnected: boolean;
   udpReady: boolean;
   targetHost: string;

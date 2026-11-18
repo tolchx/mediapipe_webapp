@@ -21,13 +21,15 @@ import type {
 } from './types/hand';
 import { FINGER_SPECS } from './vision/handKinematics';
 import { HandTrackerService } from './vision/handTracker';
-import { renderHandOverlay } from './vision/handRenderer';
+import { renderHandOverlay, type DraftZoneBox } from './vision/handRenderer';
 import {
   TRIGGER_TARGET_LABELS,
   TriggerZoneEngine,
   computeContainBox,
+  getZoneHandles,
   getZonePixelGeometry,
   hitTestZoneNormalized,
+  type ZoneHandleId,
 } from './vision/triggerZones';
 import { GestureSynthEngine } from './audio/synthEngine';
 import { AudioVisualizer } from './audio/audioVisualizer';
@@ -59,8 +61,11 @@ class HandOscApp {
   private showAngles = true;
   private showIds = false;
   private showTriggers = true;
-  private editTriggers = false;
+  private editTriggers = true;
   private selectedTriggerId: string | null = null;
+  private hoveredTriggerId: string | null = null;
+  private draftZone: DraftZoneBox | null = null;
+  private isDraggingZone = false;
   private lastVideoAspect = 16 / 9;
   private lastTriggerValues = new Map<string, number>();
   private inspectPreference: 'auto' | 'left' | 'right' = 'auto';
@@ -130,6 +135,8 @@ class HandOscApp {
   private palmOrientText = byId<HTMLElement>('palmOrientText');
   private palmVelText = byId<HTMLElement>('palmVelText');
 
+  private oscBridgeRow = byId<HTMLElement>('oscBridgeRow');
+  private oscBridgeUrl = byId<HTMLInputElement>('oscBridgeUrl');
   private oscBridgeState = byId<HTMLElement>('oscBridgeState');
   private oscMsgRate = byId<HTMLElement>('oscMsgRate');
   private oscPacketsTotal = byId<HTMLElement>('oscPacketsTotal');
@@ -547,12 +554,27 @@ class HandOscApp {
       });
     }
 
+    byId<HTMLButtonElement>('btnConnectBridge').addEventListener('click', () => {
+      const wsUrl = this.oscBridgeUrl.value.trim();
+      if (!wsUrl) return;
+      this.oscTestResult.classList.add('hidden');
+      this.oscClient.connect(wsUrl);
+    });
+
     byId<HTMLButtonElement>('btnSendTestOsc').addEventListener('click', () => {
       applyOscTarget();
-      this.oscClient.sendTestPacket();
+      if (!this.oscClient.sendTestPacket()) {
+        this.oscTestResult.classList.remove('hidden');
+        this.oscTestResult.textContent =
+          '[Modo Web] No hay puente UDP conectado. Para enviar datagramas OSC reales a TouchDesigner, ejecuta el servidor local (npm start) o conecta un puente WebSocket local.';
+      }
     });
     byId<HTMLButtonElement>('btnLoopbackOsc').addEventListener('click', () => {
-      this.oscClient.runLoopbackTest();
+      if (!this.oscClient.runLoopbackTest()) {
+        this.oscTestResult.classList.remove('hidden');
+        this.oscTestResult.textContent =
+          '[Modo Web] El loopback UDP requiere el puente Node.js local activo (npm start).';
+      }
     });
   }
 
@@ -560,17 +582,22 @@ class HandOscApp {
     const chkShowTriggers = byId<HTMLInputElement>('chkShowTriggers');
     chkShowTriggers.addEventListener('change', () => {
       this.showTriggers = chkShowTriggers.checked;
+      this.updateZoneQuickHud();
     });
 
     const btnEditTriggers = byId<HTMLButtonElement>('btnEditTriggers');
+    const editHint = byId<HTMLElement>('viewportEditHint');
     btnEditTriggers.addEventListener('click', () => {
       this.editTriggers = !this.editTriggers;
       btnEditTriggers.classList.toggle('is-active', this.editTriggers);
-      btnEditTriggers.textContent = this.editTriggers ? 'Terminar Edición' : 'Editar Áreas';
+      btnEditTriggers.textContent = this.editTriggers ? 'Edición Mouse: ON' : 'Edición Bloqueada';
       this.handCanvas.classList.toggle('is-editing', this.editTriggers);
+      editHint.classList.toggle('hidden', !this.editTriggers);
       if (!this.editTriggers) {
         this.handCanvas.style.cursor = '';
+        this.hoveredTriggerId = null;
       }
+      this.updateZoneQuickHud();
     });
 
     byId<HTMLButtonElement>('btnAddTrigger').addEventListener('click', () => {
@@ -605,7 +632,53 @@ class HandOscApp {
       fn(this.selectedTriggerId);
       if (refreshList) this.renderTriggerZonesList();
       if (refreshEditor) this.syncSelectedTriggerEditor();
+      else this.updateZoneQuickHud();
     };
+
+    // Floating Quick HUD sobre el visor
+    byId<HTMLInputElement>('hudZoneOsc').addEventListener('input', (e) => {
+      const val = (e.target as HTMLInputElement).value;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { oscAddress: val }), true, true);
+    });
+    byId<HTMLButtonElement>('hudZoneMode').addEventListener('click', () => {
+      const zone = this.selectedTriggerId ? this.triggerEngine.getZone(this.selectedTriggerId) : null;
+      if (!zone) return;
+      const order: TriggerMode[] = ['pulse', 'momentary', 'toggle'];
+      const next = order[(order.indexOf(zone.mode) + 1) % order.length];
+      updateSelected((id) => this.triggerEngine.updateZone(id, { mode: next }), true, true);
+    });
+    byId<HTMLButtonElement>('hudZoneShape').addEventListener('click', () => {
+      const zone = this.selectedTriggerId ? this.triggerEngine.getZone(this.selectedTriggerId) : null;
+      if (!zone) return;
+      const next: TriggerShape = zone.shape === 'rect' ? 'circle' : 'rect';
+      updateSelected((id) => this.triggerEngine.updateZone(id, { shape: next }), true, true);
+    });
+    byId<HTMLSelectElement>('hudZoneTarget').addEventListener('change', (e) => {
+      const target = (e.target as HTMLSelectElement).value as TriggerTarget;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { target }), true, true);
+    });
+    byId<HTMLButtonElement>('hudZoneDuplicate').addEventListener('click', () => {
+      const zone = this.selectedTriggerId ? this.triggerEngine.getZone(this.selectedTriggerId) : null;
+      if (!zone) return;
+      const copy = this.triggerEngine.addZone({
+        ...zone,
+        id: undefined,
+        name: `${zone.name} copia`,
+        x: Math.min(0.92, zone.x + 0.05),
+        y: Math.min(0.92, zone.y + 0.05),
+        oscAddress: `${zone.oscAddress}_2`,
+      });
+      this.selectedTriggerId = copy.id;
+      this.renderTriggerZonesList();
+      this.syncSelectedTriggerEditor();
+    });
+    byId<HTMLButtonElement>('hudZoneDelete').addEventListener('click', () => {
+      if (!this.selectedTriggerId) return;
+      this.triggerEngine.removeZone(this.selectedTriggerId);
+      this.selectedTriggerId = this.triggerEngine.getZones()[0]?.id ?? null;
+      this.renderTriggerZonesList();
+      this.syncSelectedTriggerEditor();
+    });
 
     byId<HTMLInputElement>('trgName').addEventListener('input', (e) => {
       const val = (e.target as HTMLInputElement).value;
@@ -671,21 +744,77 @@ class HandOscApp {
     bindRange('trgCooldownMs', 'lblTrgCooldownMs', (v) => `${Math.round(v)} ms`, (id, cooldownMs) =>
       this.triggerEngine.updateZone(id, { cooldownMs })
     );
+
+    // Atajos de teclado cuando se edita una zona (flechas mueven, Supr elimina)
+    window.addEventListener('keydown', (ev) => {
+      if (!this.editTriggers || !this.selectedTriggerId) return;
+      const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+      if (activeTag === 'input' || activeTag === 'select' || activeTag === 'textarea') return;
+
+      const z = this.triggerEngine.getZone(this.selectedTriggerId);
+      if (!z) return;
+      const step = ev.shiftKey ? 0.04 : 0.01;
+
+      if (ev.key === 'ArrowLeft') {
+        ev.preventDefault();
+        this.triggerEngine.updateZone(z.id, { x: z.x - step });
+        this.syncSelectedTriggerEditor();
+      } else if (ev.key === 'ArrowRight') {
+        ev.preventDefault();
+        this.triggerEngine.updateZone(z.id, { x: z.x + step });
+        this.syncSelectedTriggerEditor();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        this.triggerEngine.updateZone(z.id, { y: z.y - step });
+        this.syncSelectedTriggerEditor();
+      } else if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        this.triggerEngine.updateZone(z.id, { y: z.y + step });
+        this.syncSelectedTriggerEditor();
+      } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
+        ev.preventDefault();
+        this.triggerEngine.removeZone(z.id);
+        this.selectedTriggerId = this.triggerEngine.getZones()[0]?.id ?? null;
+        this.renderTriggerZonesList();
+        this.syncSelectedTriggerEditor();
+      }
+    });
+
+    window.addEventListener('resize', () => this.updateZoneQuickHud());
   }
 
   private bindTriggerCanvasInteractions(): void {
-    type DragState = {
-      mode: 'move' | 'resize';
-      zoneId: string;
-      startX: number;
-      startY: number;
-      origX: number;
-      origY: number;
-      box: ReturnType<typeof computeContainBox>;
-    };
+    type DragState =
+      | {
+          mode: 'move';
+          zoneId: string;
+          startX: number;
+          startY: number;
+          origX: number;
+          origY: number;
+          box: ReturnType<typeof computeContainBox>;
+        }
+      | {
+          mode: 'resize';
+          zoneId: string;
+          handle: ZoneHandleId;
+          origLeft: number;
+          origTop: number;
+          origRight: number;
+          origBottom: number;
+          box: ReturnType<typeof computeContainBox>;
+        }
+      | {
+          mode: 'draw';
+          startVx: number;
+          startVy: number;
+          startPxX: number;
+          startPxY: number;
+          box: ReturnType<typeof computeContainBox>;
+        };
     let drag: DragState | null = null;
 
-    const getCanvasCoords = (ev: PointerEvent | MouseEvent) => {
+    const getCanvasCoords = (ev: PointerEvent | MouseEvent | WheelEvent) => {
       const rect = this.handCanvas.getBoundingClientRect();
       return {
         x: ev.clientX - rect.left,
@@ -695,43 +824,60 @@ class HandOscApp {
       };
     };
 
-    this.handCanvas.addEventListener('pointerdown', (ev) => {
-      if (!this.editTriggers) return;
-      const pt = getCanvasCoords(ev);
-      const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
+    const findHandleAt = (px: number, py: number, box: ReturnType<typeof computeContainBox>) => {
       const zones = this.triggerEngine.getZones();
-
-      // 1. Verificar manijas de tamaño primero
-      for (let i = zones.length - 1; i >= 0; i--) {
-        const z = zones[i];
-        const geom = getZonePixelGeometry(z, box);
-        const hx = z.shape === 'circle' ? geom.cx + geom.radius : geom.left + geom.w;
-        const hy = z.shape === 'circle' ? geom.cy : geom.top + geom.h;
-        if (Math.hypot(pt.x - hx, pt.y - hy) <= 13) {
-          this.selectedTriggerId = z.id;
-          this.renderTriggerZonesList();
-          this.syncSelectedTriggerEditor();
-          drag = {
-            mode: 'resize',
-            zoneId: z.id,
-            startX: pt.x,
-            startY: pt.y,
-            origX: z.x,
-            origY: z.y,
-            box,
-          };
-          this.handCanvas.setPointerCapture(ev.pointerId);
-          return;
+      // Priorizar la zona seleccionada primero para que sus 8 manijas no queden tapadas
+      const ordered = [...zones].sort((a, b) =>
+        a.id === this.selectedTriggerId ? 1 : b.id === this.selectedTriggerId ? -1 : 0
+      );
+      for (let i = ordered.length - 1; i >= 0; i--) {
+        const z = ordered[i];
+        for (const h of getZoneHandles(z, box)) {
+          if (Math.hypot(px - h.x, py - h.y) <= 11) {
+            return { zone: z, handle: h };
+          }
         }
       }
+      return null;
+    };
 
-      // 2. Verificar cuerpo del pulsador
+    this.handCanvas.addEventListener('pointerdown', (ev) => {
+      if (!this.editTriggers || !this.showTriggers) return;
+      if (ev.button !== 0) return;
+      const pt = getCanvasCoords(ev);
+      const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
+
+      // 1. Verificar cualquiera de las manijas (8 en rect, 4 en círculo)
+      const hitHandle = findHandleAt(pt.x, pt.y, box);
+      if (hitHandle) {
+        const z = hitHandle.zone;
+        this.selectedTriggerId = z.id;
+        this.isDraggingZone = true;
+        this.renderTriggerZonesList();
+        this.syncSelectedTriggerEditor();
+        drag = {
+          mode: 'resize',
+          zoneId: z.id,
+          handle: hitHandle.handle.id,
+          origLeft: z.x - z.width * 0.5,
+          origTop: z.y - z.height * 0.5,
+          origRight: z.x + z.width * 0.5,
+          origBottom: z.y + z.height * 0.5,
+          box,
+        };
+        this.handCanvas.setPointerCapture(ev.pointerId);
+        return;
+      }
+
+      // 2. Verificar cuerpo del pulsador para mover
       const vx = (pt.x - box.x) / Math.max(box.w, 1);
       const vy = (pt.y - box.y) / Math.max(box.h, 1);
+      const zones = this.triggerEngine.getZones();
       for (let i = zones.length - 1; i >= 0; i--) {
         const z = zones[i];
         if (hitTestZoneNormalized(z, vx, vy, this.lastVideoAspect).inside) {
           this.selectedTriggerId = z.id;
+          this.isDraggingZone = true;
           this.renderTriggerZonesList();
           this.syncSelectedTriggerEditor();
           drag = {
@@ -747,13 +893,36 @@ class HandOscApp {
           return;
         }
       }
+
+      // 3. Arrastrar sobre área vacía para dibujar una nueva zona directamente
+      if (vx >= 0 && vx <= 1 && vy >= 0 && vy <= 1) {
+        this.isDraggingZone = true;
+        this.updateZoneQuickHud();
+        drag = {
+          mode: 'draw',
+          startVx: vx,
+          startVy: vy,
+          startPxX: pt.x,
+          startPxY: pt.y,
+          box,
+        };
+        this.draftZone = { x1: vx, y1: vy, x2: vx, y2: vy };
+        this.handCanvas.setPointerCapture(ev.pointerId);
+      }
     });
 
     this.handCanvas.addEventListener('pointermove', (ev) => {
-      if (!this.editTriggers) return;
+      if (!this.editTriggers || !this.showTriggers) return;
       const pt = getCanvasCoords(ev);
 
       if (drag) {
+        if (drag.mode === 'draw') {
+          const vx = Math.max(0, Math.min(1, (pt.x - drag.box.x) / Math.max(drag.box.w, 1)));
+          const vy = Math.max(0, Math.min(1, (pt.y - drag.box.y) / Math.max(drag.box.h, 1)));
+          this.draftZone = { x1: drag.startVx, y1: drag.startVy, x2: vx, y2: vy };
+          return;
+        }
+
         const z = this.triggerEngine.getZone(drag.zoneId);
         if (!z) return;
 
@@ -764,20 +933,48 @@ class HandOscApp {
             x: drag.origX + dx,
             y: drag.origY + dy,
           });
+          this.handCanvas.style.cursor = 'grabbing';
         } else {
-          const geom = getZonePixelGeometry(z, drag.box);
           if (z.shape === 'circle') {
+            const geom = getZonePixelGeometry(z, drag.box);
             const minDim = Math.min(drag.box.w, drag.box.h);
             const r = Math.hypot(pt.x - geom.cx, pt.y - geom.cy);
             this.triggerEngine.updateZone(drag.zoneId, {
               width: (r * 2) / Math.max(minDim, 1),
             });
-          } else {
+          } else if (ev.altKey) {
+            const geom = getZonePixelGeometry(z, drag.box);
             const halfW = Math.abs(pt.x - geom.cx);
             const halfH = Math.abs(pt.y - geom.cy);
+            const update: { width?: number; height?: number } = {};
+            if (drag.handle.includes('e') || drag.handle.includes('w')) {
+              update.width = (halfW * 2) / Math.max(drag.box.w, 1);
+            }
+            if (drag.handle.includes('n') || drag.handle.includes('s')) {
+              update.height = (halfH * 2) / Math.max(drag.box.h, 1);
+            }
+            this.triggerEngine.updateZone(drag.zoneId, update);
+          } else {
+            // Redimensionado anclado al borde opuesto (como Figma / TD)
+            const vx = Math.max(0.01, Math.min(0.99, (pt.x - drag.box.x) / Math.max(drag.box.w, 1)));
+            const vy = Math.max(0.01, Math.min(0.99, (pt.y - drag.box.y) / Math.max(drag.box.h, 1)));
+            const minSize = 0.04;
+
+            let left = drag.origLeft;
+            let right = drag.origRight;
+            let top = drag.origTop;
+            let bottom = drag.origBottom;
+
+            if (drag.handle.includes('w')) left = Math.min(vx, right - minSize);
+            if (drag.handle.includes('e')) right = Math.max(vx, left + minSize);
+            if (drag.handle.includes('n')) top = Math.min(vy, bottom - minSize);
+            if (drag.handle.includes('s')) bottom = Math.max(vy, top + minSize);
+
             this.triggerEngine.updateZone(drag.zoneId, {
-              width: (halfW * 2) / Math.max(drag.box.w, 1),
-              height: (halfH * 2) / Math.max(drag.box.h, 1),
+              x: (left + right) * 0.5,
+              y: (top + bottom) * 0.5,
+              width: right - left,
+              height: bottom - top,
             });
           }
         }
@@ -785,33 +982,68 @@ class HandOscApp {
         return;
       }
 
-      // Actualizar cursor al pasar por encima
+      // Hover y cursor en vivo
       const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
-      const zones = this.triggerEngine.getZones();
-      let cursor = 'crosshair';
+      const hitHandle = findHandleAt(pt.x, pt.y, box);
+      if (hitHandle) {
+        this.hoveredTriggerId = hitHandle.zone.id;
+        this.handCanvas.style.cursor = hitHandle.handle.cursor;
+        return;
+      }
+
       const vx = (pt.x - box.x) / Math.max(box.w, 1);
       const vy = (pt.y - box.y) / Math.max(box.h, 1);
-
+      const zones = this.triggerEngine.getZones();
+      let hovered: string | null = null;
       for (let i = zones.length - 1; i >= 0; i--) {
-        const z = zones[i];
-        const geom = getZonePixelGeometry(z, box);
-        const hx = z.shape === 'circle' ? geom.cx + geom.radius : geom.left + geom.w;
-        const hy = z.shape === 'circle' ? geom.cy : geom.top + geom.h;
-        if (Math.hypot(pt.x - hx, pt.y - hy) <= 13) {
-          cursor = 'nwse-resize';
-          break;
-        }
-        if (hitTestZoneNormalized(z, vx, vy, this.lastVideoAspect).inside) {
-          cursor = 'grab';
+        if (hitTestZoneNormalized(zones[i], vx, vy, this.lastVideoAspect).inside) {
+          hovered = zones[i].id;
           break;
         }
       }
-      this.handCanvas.style.cursor = cursor;
+      this.hoveredTriggerId = hovered;
+      this.handCanvas.style.cursor = hovered ? 'grab' : 'crosshair';
+    });
+
+    this.handCanvas.addEventListener('pointerleave', () => {
+      if (!drag) {
+        this.hoveredTriggerId = null;
+      }
     });
 
     const endDrag = (ev: PointerEvent) => {
       if (!drag) return;
+      const finished = drag;
       drag = null;
+      this.isDraggingZone = false;
+
+      if (finished.mode === 'draw' && this.draftZone) {
+        const pt = getCanvasCoords(ev);
+        const distPx = Math.hypot(pt.x - finished.startPxX, pt.y - finished.startPxY);
+        const wNorm = Math.abs(this.draftZone.x2 - this.draftZone.x1);
+        const hNorm = Math.abs(this.draftZone.y2 - this.draftZone.y1);
+
+        if (distPx >= 24 && wNorm >= 0.04 && hNorm >= 0.04) {
+          const created = this.triggerEngine.addZone({
+            x: (this.draftZone.x1 + this.draftZone.x2) * 0.5,
+            y: (this.draftZone.y1 + this.draftZone.y2) * 0.5,
+            width: wNorm,
+            height: hNorm,
+          });
+          this.selectedTriggerId = created.id;
+          this.renderTriggerZonesList();
+          this.syncSelectedTriggerEditor();
+        } else {
+          // Clic simple en espacio vacío: deseleccionar HUD para limpiar vista
+          this.selectedTriggerId = null;
+          this.renderTriggerZonesList();
+          this.syncSelectedTriggerEditor();
+        }
+        this.draftZone = null;
+      } else {
+        this.updateZoneQuickHud();
+      }
+
       try {
         this.handCanvas.releasePointerCapture(ev.pointerId);
       } catch {
@@ -821,8 +1053,30 @@ class HandOscApp {
     this.handCanvas.addEventListener('pointerup', endDrag);
     this.handCanvas.addEventListener('pointercancel', endDrag);
 
+    // Rueda del mouse sobre una zona: redimensiona rápido
+    this.handCanvas.addEventListener(
+      'wheel',
+      (ev) => {
+        if (!this.editTriggers || !this.showTriggers) return;
+        const targetId = this.hoveredTriggerId || this.selectedTriggerId;
+        if (!targetId) return;
+        const z = this.triggerEngine.getZone(targetId);
+        if (!z) return;
+        ev.preventDefault();
+        const delta = ev.deltaY < 0 ? 0.02 : -0.02;
+        this.selectedTriggerId = z.id;
+        this.triggerEngine.updateZone(z.id, {
+          width: z.width + delta,
+          height: z.shape === 'circle' ? z.height : z.height + delta,
+        });
+        this.renderTriggerZonesList();
+        this.syncSelectedTriggerEditor();
+      },
+      { passive: false }
+    );
+
     this.handCanvas.addEventListener('dblclick', (ev) => {
-      if (!this.editTriggers) return;
+      if (!this.editTriggers || !this.showTriggers) return;
       const pt = getCanvasCoords(ev);
       const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
       const vx = (pt.x - box.x) / Math.max(box.w, 1);
@@ -833,6 +1087,53 @@ class HandOscApp {
       this.renderTriggerZonesList();
       this.syncSelectedTriggerEditor();
     });
+  }
+
+  private updateZoneQuickHud(): void {
+    const hud = byId<HTMLElement>('zoneQuickHud');
+    const zone = this.selectedTriggerId
+      ? this.triggerEngine.getZone(this.selectedTriggerId)
+      : undefined;
+
+    if (!zone || !this.editTriggers || !this.showTriggers || this.isDraggingZone) {
+      hud.classList.add('hidden');
+      return;
+    }
+
+    const modeLabels: Record<TriggerMode, string> = {
+      pulse: 'Pulso',
+      momentary: 'Mantener',
+      toggle: 'Toggle',
+    };
+
+    byId<HTMLElement>('hudZoneName').textContent = zone.name;
+    const oscInput = byId<HTMLInputElement>('hudZoneOsc');
+    if (document.activeElement !== oscInput) {
+      oscInput.value = zone.oscAddress;
+    }
+    byId<HTMLButtonElement>('hudZoneMode').textContent = modeLabels[zone.mode];
+    byId<HTMLButtonElement>('hudZoneShape').textContent =
+      zone.shape === 'circle' ? 'Círculo' : 'Rect';
+    byId<HTMLSelectElement>('hudZoneTarget').value = zone.target;
+
+    hud.classList.remove('hidden');
+
+    // Posicionar flotante arriba o abajo de la zona dentro de viewportWrap
+    const wrapW = this.handCanvas.clientWidth;
+    const wrapH = this.handCanvas.clientHeight;
+    if (wrapW === 0 || wrapH === 0) return;
+
+    const box = computeContainBox(wrapW, wrapH, this.lastVideoAspect);
+    const geom = getZonePixelGeometry(zone, box);
+    const hudW = hud.offsetWidth || 320;
+    const hudH = hud.offsetHeight || 32;
+
+    const left = Math.max(8, Math.min(geom.cx - hudW * 0.5, wrapW - hudW - 8));
+    const preferTop = geom.top - hudH - 8;
+    const top = preferTop >= 8 ? preferTop : Math.min(geom.top + geom.h + 8, wrapH - hudH - 8);
+
+    hud.style.left = `${Math.round(left)}px`;
+    hud.style.top = `${Math.round(top)}px`;
   }
 
   private renderTriggerZonesList(): void {
@@ -926,6 +1227,7 @@ class HandOscApp {
 
     if (!zone) {
       editorCard.classList.add('hidden');
+      this.updateZoneQuickHud();
       return;
     }
 
@@ -960,6 +1262,7 @@ class HandOscApp {
 
     byId<HTMLInputElement>('trgCooldownMs').value = String(zone.cooldownMs);
     byId<HTMLElement>('lblTrgCooldownMs').textContent = `${zone.cooldownMs} ms`;
+    this.updateZoneQuickHud();
   }
 
   private syncSynthControlsToDom(): void {
@@ -994,6 +1297,7 @@ class HandOscApp {
       this.simulatorPanel.classList.add('hidden');
       this.cameraPrompt.classList.toggle('hidden', this.cameraActive);
     }
+    requestAnimationFrame(() => this.updateZoneQuickHud());
   }
 
   private async refreshCameraDevices(): Promise<void> {
@@ -1146,6 +1450,8 @@ class HandOscApp {
       showTriggers: this.showTriggers,
       editTriggers: this.editTriggers,
       selectedTriggerId: this.selectedTriggerId,
+      hoveredTriggerId: this.hoveredTriggerId,
+      draftZone: this.draftZone,
       videoAspect,
     });
 
@@ -1299,7 +1605,21 @@ class HandOscApp {
 
   private updateOscStatsUi(stats: OscStats): void {
     const oscEnabled = this.oscClient.getConfig().enabled;
-    if (!stats.wsConnected) {
+    this.oscBridgeRow.classList.toggle('hidden', stats.bridgeMode === 'connected');
+
+    if (stats.bridgeMode === 'standalone' && !stats.wsConnected) {
+      this.oscStatusDot.className = stats.lastError ? 'dot dot-err' : 'dot dot-warn';
+      this.oscStatusText.textContent = stats.lastError
+        ? `OSC: ${stats.lastError}`
+        : 'OSC: Modo Web (Monitor local)';
+      this.oscBridgeState.textContent = stats.lastError
+        ? `Sin puente (${stats.lastError})`
+        : 'Modo Web (sin puente UDP)';
+    } else if (stats.bridgeMode === 'connecting' && !stats.wsConnected) {
+      this.oscStatusDot.className = 'dot dot-warn';
+      this.oscStatusText.textContent = 'OSC: Conectando...';
+      this.oscBridgeState.textContent = 'Conectando...';
+    } else if (!stats.wsConnected) {
       this.oscStatusDot.className = 'dot dot-err';
       this.oscStatusText.textContent = 'OSC: Puente desconectado';
       this.oscBridgeState.textContent = 'Desconectado';

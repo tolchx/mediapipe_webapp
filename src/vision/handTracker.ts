@@ -11,6 +11,11 @@ import type {
 } from '../types/hand';
 import { HandKinematicsProcessor } from './handKinematics';
 
+function resolvePublicAssetUrl(relativePath: string): string {
+  const baseUrl = new URL(import.meta.env.BASE_URL || './', window.location.href);
+  return new URL(relativePath.replace(/^\/+/, ''), baseUrl).href;
+}
+
 export interface TrackerInitStatus {
   ready: boolean;
   delegate: 'GPU' | 'CPU' | null;
@@ -182,12 +187,13 @@ export class HandTrackerService {
     if (this.landmarker) return this.initStatus;
 
     try {
-      const vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm');
+      const vision = await FilesetResolver.forVisionTasks(resolvePublicAssetUrl('mediapipe/wasm'));
+      const modelAssetPath = resolvePublicAssetUrl('models/hand_landmarker.task');
       for (const delegate of ['GPU', 'CPU'] as const) {
         try {
           this.landmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
-              modelAssetPath: '/models/hand_landmarker.task',
+              modelAssetPath,
               delegate,
             },
             runningMode: 'VIDEO',

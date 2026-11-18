@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>HAND·OSC — MediaPipe Tracking de Manos, Falanges &amp; Control Sonoro</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23070a0f'/><text x='50%25' y='56%25' dominant-baseline='middle' text-anchor='middle' font-size='20' fill='%2322d3ee'>◈</text></svg>" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -85,8 +86,8 @@
                   <input type="checkbox" id="chkShowTriggers" checked />
                   <span>Pulsadores</span>
                 </label>
-                <button type="button" class="btn btn-mini" id="btnEditTriggers" title="Arrastrar y redimensionar pulsadores sobre el video">
-                  Editar Áreas
+                <button type="button" class="btn btn-mini is-active" id="btnEditTriggers" title="Permitir mover, redimensionar y crear pulsadores con el mouse">
+                  Edición Mouse: ON
                 </button>
                 <label class="range-inline" title="Suavizado temporal EMA">
                   <span>Suavizado</span>
@@ -97,7 +98,31 @@
 
             <div class="viewport-wrap" id="viewportWrap">
               <video id="webcamVideo" autoplay playsinline muted class="mirrored"></video>
-              <canvas id="handCanvas"></canvas>
+              <canvas id="handCanvas" class="is-editing"></canvas>
+
+              <div class="zone-quick-hud hidden" id="zoneQuickHud">
+                <span class="hud-badge" id="hudZoneName">Pulsador 1</span>
+                <input type="text" id="hudZoneOsc" class="hud-input" title="Dirección OSC" placeholder="/td/pad/1" />
+                <button type="button" class="hud-btn" id="hudZoneMode" title="Cambiar tipo de trigger">Pulso</button>
+                <button type="button" class="hud-btn" id="hudZoneShape" title="Cambiar forma">Rect</button>
+                <select id="hudZoneTarget" class="hud-select" title="Elemento detector">
+                  <option value="any_hand">Mano</option>
+                  <option value="palm">Palma</option>
+                  <option value="any_tip">Cualq. Dedo</option>
+                  <option value="index_tip">Índice</option>
+                  <option value="thumb_tip">Pulgar</option>
+                  <option value="middle_tip">Medio</option>
+                  <option value="ring_tip">Anular</option>
+                  <option value="pinky_tip">Meñique</option>
+                  <option value="pinch">Pinch</option>
+                </select>
+                <button type="button" class="hud-btn" id="hudZoneDuplicate" title="Duplicar zona">⧉</button>
+                <button type="button" class="hud-btn hud-btn-del" id="hudZoneDelete" title="Eliminar zona">✕</button>
+              </div>
+
+              <div class="viewport-edit-hint" id="viewportEditHint">
+                Cursor: arrastra zona para mover · bordes/rueda para tamaño · arrastra vacío o doble clic para crear
+              </div>
 
               <div class="viewport-overlay-prompt" id="cameraPrompt">
                 <div class="prompt-box">
@@ -525,6 +550,14 @@
                   empaqueta en datagramas binarios <strong>OSC 1.0 UDP</strong> para TouchDesigner,
                   Max/MSP, Pure Data, Ableton o SuperCollider.
                 </p>
+
+                <div class="osc-bridge-row hidden" id="oscBridgeRow">
+                  <label class="field">
+                    <span>Puente Local WebSocket (opcional en versión online)</span>
+                    <input type="text" id="oscBridgeUrl" value="ws://127.0.0.1:3000/osc" placeholder="ws://127.0.0.1:3000/osc" />
+                  </label>
+                  <button type="button" class="btn btn-ghost" id="btnConnectBridge">Conectar Puente</button>
+                </div>
 
                 <div class="osc-target-row">
                   <label class="field">

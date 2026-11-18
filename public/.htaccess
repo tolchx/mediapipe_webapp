@@ -1,0 +1,42 @@
+DirectoryIndex index.html
+
+# MIME types required for WebAssembly streaming instantiation and MediaPipe model files
+<IfModule mod_mime.c>
+  AddType application/wasm .wasm
+  AddType application/octet-stream .task
+</IfModule>
+
+# Override root Permissions-Policy and CSP so webcam, MediaPipe WASM, and Web Audio run online
+<IfModule mod_headers.c>
+  Header set X-Content-Type-Options "nosniff"
+  Header set X-Frame-Options "SAMEORIGIN"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+  Header set Permissions-Policy "geolocation=(), microphone=(), camera=(self)"
+  Header set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; worker-src 'self' blob:; connect-src 'self' https: blob: data: ws://127.0.0.1:* ws://localhost:* wss://127.0.0.1:* wss://localhost:*; frame-ancestors 'self';"
+</IfModule>
+
+# Prevent stale HTML after deploys
+<FilesMatch "\.html$">
+  <IfModule mod_headers.c>
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </IfModule>
+</FilesMatch>
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /mediapipeweb/
+
+  # Force HTTPS
+  RewriteCond %{HTTPS} off
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Serve existing files and directories directly without falling back to portfolio SPA
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # Keep unmatched paths inside /mediapipeweb/
+  RewriteRule ^ index.html [L]
+</IfModule>
