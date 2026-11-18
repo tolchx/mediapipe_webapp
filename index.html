@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HAND·OSC — MediaPipe Tracking de Manos, Falanges &amp; Control Sonoro</title>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">◈</div>
+          <div>
+            <h1>HAND·OSC</h1>
+            <p class="brand-sub">MediaPipe Manos &amp; Falanges · OSC UDP · Síntesis Sonora</p>
+          </div>
+        </div>
+
+        <div class="status-cluster">
+          <div class="pill" id="mpStatusPill">
+            <span class="dot dot-warn" id="mpStatusDot"></span>
+            <span id="mpStatusText">MediaPipe: Inicializando...</span>
+          </div>
+          <div class="pill" id="oscStatusPill">
+            <span class="dot dot-warn" id="oscStatusDot"></span>
+            <span id="oscStatusText">OSC: Conectando...</span>
+          </div>
+          <div class="pill pill-mono" id="freqHeaderPill">
+            <span id="freqHeaderText">220.0 Hz · A3</span>
+          </div>
+          <div class="pill pill-mono" id="fpsPill">
+            <span id="fpsText">0 FPS</span>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="segmented" role="group" aria-label="Fuente de tracking">
+            <button type="button" class="seg-btn active" id="btnSourceCamera">Cámara</button>
+            <button type="button" class="seg-btn" id="btnSourceSim">Simulador</button>
+          </div>
+
+          <select id="cameraSelect" class="select-compact hidden" title="Seleccionar cámara"></select>
+
+          <button type="button" class="btn btn-primary" id="btnToggleCamera">
+            Iniciar Cámara
+          </button>
+
+          <button type="button" class="btn btn-audio" id="btnToggleAudio">
+            Activar Audio
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <!-- COLUMNA IZQUIERDA: VISIÓN + SINTETIZADOR VISUAL -->
+        <section class="stage-column">
+          <div class="card stage-card">
+            <div class="card-toolbar">
+              <div class="toolbar-title">
+                <span class="badge-live" id="stageSourceBadge">CÁMARA MEDIAPIPE</span>
+                <span class="muted-text" id="handsDetectedBadge">0 manos detectadas</span>
+              </div>
+              <div class="toolbar-controls">
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkMirror" checked />
+                  <span>Espejo</span>
+                </label>
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkShowVideo" checked />
+                  <span>Video</span>
+                </label>
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkShowAngles" checked />
+                  <span>Ángulos (°)</span>
+                </label>
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkShowIds" />
+                  <span>IDs 0–20</span>
+                </label>
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkSwapHands" />
+                  <span>Invertir I/D</span>
+                </label>
+                <label class="range-inline" title="Suavizado temporal EMA">
+                  <span>Suavizado</span>
+                  <input type="range" id="rngSmoothing" min="0.15" max="1" step="0.05" value="0.48" />
+                </label>
+              </div>
+            </div>
+
+            <div class="viewport-wrap" id="viewportWrap">
+              <video id="webcamVideo" autoplay playsinline muted class="mirrored"></video>
+              <canvas id="handCanvas"></canvas>
+
+              <div class="viewport-overlay-prompt" id="cameraPrompt">
+                <div class="prompt-box">
+                  <h2>Tracking de Manos y Falanges</h2>
+                  <p>
+                    Detecta 21 puntos por mano, calcula la flexión angular de cada falange
+                    (proximal, media y distal), transmite por protocolo <strong>OSC</strong> y
+                    manipula frecuencias en vivo.
+                  </p>
+                  <p class="prompt-error hidden" id="cameraErrorMsg"></p>
+                  <div class="prompt-actions">
+                    <button type="button" class="btn btn-primary" id="btnPromptStartCam">
+                      Iniciar Cámara Webcam
+                    </button>
+                    <button type="button" class="btn btn-ghost" id="btnPromptUseSim">
+                      Probar con Simulador Virtual
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- CONTROLES DEL SIMULADOR VIRTUAL (SOLO VISIBLES EN MODO SIMULADOR) -->
+            <div class="sim-bar hidden" id="simulatorPanel">
+              <div class="sim-row">
+                <span class="sim-title">Simulador de Mano Virtual</span>
+                <select id="simPreset" class="select-compact">
+                  <option value="theremin_wave">Onda Teremin (Barrido Hz + Falanges)</option>
+                  <option value="pinch_sweep">Pinch &amp; Barrido Armónico</option>
+                  <option value="manual">Manual (Control Directo)</option>
+                </select>
+                <select id="simHandsCount" class="select-compact">
+                  <option value="1">1 Mano (Der)</option>
+                  <option value="2">2 Manos (Izq + Der)</option>
+                </select>
+              </div>
+              <div class="sim-manual-grid hidden" id="simManualGrid">
+                <label class="sim-slider">
+                  <span>Altura Y (Frec)</span>
+                  <input type="range" id="simPalmY" min="0.12" max="0.88" step="0.01" value="0.45" />
+                </label>
+                <label class="sim-slider">
+                  <span>Pinch Pulgar-Índice</span>
+                  <input type="range" id="simPinch" min="0" max="1" step="0.01" value="0.65" />
+                </label>
+                <label class="sim-slider">
+                  <span>Pulgar Curl</span>
+                  <input type="range" id="simCurlThumb" min="0" max="1" step="0.01" value="0.2" />
+                </label>
+                <label class="sim-slider">
+                  <span>Índice Curl</span>
+                  <input type="range" id="simCurlIndex" min="0" max="1" step="0.01" value="0.15" />
+                </label>
+                <label class="sim-slider">
+                  <span>Medio Curl</span>
+                  <input type="range" id="simCurlMiddle" min="0" max="1" step="0.01" value="0.25" />
+                </label>
+                <label class="sim-slider">
+                  <span>Anular Curl</span>
+                  <input type="range" id="simCurlRing" min="0" max="1" step="0.01" value="0.3" />
+                </label>
+                <label class="sim-slider">
+                  <span>Meñique Curl</span>
+                  <input type="range" id="simCurlPinky" min="0" max="1" step="0.01" value="0.2" />
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- CARD DE SINTETIZADOR Y ESPECTRO DE FRECUENCIAS -->
+          <div class="card audio-stage-card">
+            <div class="audio-metrics-strip">
+              <div class="metric-hero">
+                <span class="metric-label">Frecuencia Fundamental</span>
+                <div class="metric-value-row">
+                  <strong id="readoutFreqHz">220.0 Hz</strong>
+                  <span class="note-badge" id="readoutNote">A3</span>
+                </div>
+              </div>
+              <div class="metric-mini">
+                <span class="metric-label">Filtro Low-Pass</span>
+                <strong id="readoutCutoff">2200 Hz</strong>
+              </div>
+              <div class="metric-mini">
+                <span class="metric-label">Modulación FM</span>
+                <strong id="readoutFm">0 Hz</strong>
+              </div>
+              <div class="metric-mini">
+                <span class="metric-label">Vibrato LFO</span>
+                <strong id="readoutLfo">4.5 Hz · ±0 Hz</strong>
+              </div>
+              <div class="metric-mini">
+                <span class="metric-label">Ganancia</span>
+                <strong id="readoutGain">0%</strong>
+              </div>
+            </div>
+
+            <div class="audio-canvas-wrap">
+              <canvas id="audioCanvas"></canvas>
+            </div>
+
+            <div class="audio-quick-controls">
+              <label class="inline-field">
+                <span>Mapeo</span>
+                <select id="quickSynthMode" class="select-compact">
+                  <option value="theremin">Altura Y → Hz (Teremin)</option>
+                  <option value="pinch-pitch">Pinch Pulgar-Índice → Hz</option>
+                  <option value="dual-hand">Dual: Der Hz · Izq FM</option>
+                </select>
+              </label>
+              <label class="inline-field">
+                <span>Escala</span>
+                <select id="quickSynthScale" class="select-compact">
+                  <option value="pentatonic_minor">Pentatónica Menor</option>
+                  <option value="free">Libre (Hz continuo)</option>
+                  <option value="major">Mayor</option>
+                  <option value="minor">Menor Natural</option>
+                  <option value="dorian">Dórica</option>
+                  <option value="chromatic">Cromática</option>
+                </select>
+              </label>
+              <label class="inline-field">
+                <span>Onda</span>
+                <select id="quickSynthWave" class="select-compact">
+                  <option value="sawtooth">Sierra (Rica)</option>
+                  <option value="triangle">Triángulo</option>
+                  <option value="sine">Senoidal (Pura)</option>
+                  <option value="square">Cuadrada</option>
+                </select>
+              </label>
+              <label class="inline-field range-inline">
+                <span>Volumen</span>
+                <input type="range" id="rngMasterVolume" min="0" max="1" step="0.02" value="0.65" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- COLUMNA DERECHA: INSPECTOR DE FALANGES, SONIDO Y OSC -->
+        <aside class="inspector-column card">
+          <nav class="tab-bar" role="tablist">
+            <button type="button" class="tab-btn active" data-tab="kinematics">
+              Dedos y Falanges
+            </button>
+            <button type="button" class="tab-btn" data-tab="synth">
+              Control Sonoro
+            </button>
+            <button type="button" class="tab-btn" data-tab="osc">
+              Protocolo OSC
+            </button>
+          </nav>
+
+          <div class="tab-panels">
+            <!-- TAB 1: DEDOS Y FALANGES -->
+            <div class="tab-panel active" id="tab-kinematics">
+              <div class="hand-selector-bar">
+                <div class="segmented" role="group" aria-label="Mano inspeccionada">
+                  <button type="button" class="seg-btn active" id="btnInspectAuto">Auto</button>
+                  <button type="button" class="seg-btn" id="btnInspectRight">Derecha</button>
+                  <button type="button" class="seg-btn" id="btnInspectLeft">Izquierda</button>
+                </div>
+                <span class="pill-mini" id="inspectedHandBadge">Sin mano</span>
+              </div>
+
+              <div class="palm-summary-grid">
+                <div class="summary-cell">
+                  <span>Palma XYZ</span>
+                  <strong id="palmXyzText">—</strong>
+                </div>
+                <div class="summary-cell">
+                  <span>Apertura</span>
+                  <strong id="palmOpenText">0%</strong>
+                </div>
+                <div class="summary-cell">
+                  <span>Pitch / Yaw / Roll</span>
+                  <strong id="palmOrientText">0° / 0° / 0°</strong>
+                </div>
+                <div class="summary-cell">
+                  <span>Velocidad</span>
+                  <strong id="palmVelText">0.00</strong>
+                </div>
+              </div>
+
+              <div class="section-block">
+                <h3>Distancias Pinch (Pulgar vs Dedos)</h3>
+                <div class="pinch-grid" id="pinchListContainer"></div>
+              </div>
+
+              <div class="section-block">
+                <h3>Flexión por Dedo y Falange Individual</h3>
+                <div class="fingers-list" id="fingersListContainer"></div>
+              </div>
+            </div>
+
+            <!-- TAB 2: CONTROL SONORO -->
+            <div class="tab-panel" id="tab-synth">
+              <div class="section-block">
+                <h3>Arquitectura de Control de Frecuencias</h3>
+                <p class="hint-text">
+                  Manipula la frecuencia fundamental, filtro armónico, vibrato y sub-octava usando
+                  la altura de la mano, el pinch pulgar-índice y la flexión de cada dedo/falange.
+                </p>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Modo de Mapeo Gestual</span>
+                    <select id="synthMode">
+                      <option value="theremin">Teremin (Altura Palma Y → Frecuencia Hz)</option>
+                      <option value="pinch-pitch">Pinch (Pulgar-Índice → Frecuencia Hz)</option>
+                      <option value="dual-hand">Dual (Der = Frecuencia · Izq = FM/Vol)</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Escala Musical / Cuantizador</span>
+                    <select id="synthScale">
+                      <option value="pentatonic_minor">Pentatónica Menor</option>
+                      <option value="free">Libre (Barrido continuo en Hz)</option>
+                      <option value="major">Escala Mayor</option>
+                      <option value="minor">Escala Menor Natural</option>
+                      <option value="dorian">Modo Dórico</option>
+                      <option value="chromatic">Cromática (Semitonos)</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Nota Raíz</span>
+                    <select id="synthRootNote">
+                      <option value="0">C (Do)</option>
+                      <option value="1">C# / Db</option>
+                      <option value="2">D (Re)</option>
+                      <option value="3">D# / Eb</option>
+                      <option value="4">E (Mi)</option>
+                      <option value="5">F (Fa)</option>
+                      <option value="6">F# / Gb</option>
+                      <option value="7">G (Sol)</option>
+                      <option value="8">G# / Ab</option>
+                      <option value="9" selected>A (La)</option>
+                      <option value="10">A# / Bb</option>
+                      <option value="11">B (Si)</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Forma de Onda</span>
+                    <select id="synthWaveform">
+                      <option value="sawtooth">Diente de Sierra (Sawtooth)</option>
+                      <option value="triangle">Triangular</option>
+                      <option value="sine">Senoidal Pura</option>
+                      <option value="square">Cuadrada</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Frecuencia Mínima: <strong id="lblMinFreq">82 Hz</strong></span>
+                    <input type="range" id="rngMinFreq" min="40" max="400" step="1" value="82" />
+                  </label>
+
+                  <label class="field">
+                    <span>Frecuencia Máxima: <strong id="lblMaxFreq">988 Hz</strong></span>
+                    <input type="range" id="rngMaxFreq" min="240" max="2400" step="5" value="988" />
+                  </label>
+
+                  <label class="field">
+                    <span>Portamento / Glide: <strong id="lblGlide">32 ms</strong></span>
+                    <input type="range" id="rngGlide" min="5" max="250" step="1" value="32" />
+                  </label>
+
+                  <label class="field">
+                    <span>Resonancia Base Filtro (Q): <strong id="lblResonance">3.2</strong></span>
+                    <input type="range" id="rngResonance" min="0.5" max="12" step="0.1" value="3.2" />
+                  </label>
+                </div>
+
+                <label class="checkbox-row">
+                  <input type="checkbox" id="chkPinchGate" />
+                  <span>Usar Pinch como Gate (solo emitir sonido al cerrar pellizco)</span>
+                </label>
+              </div>
+
+              <div class="section-block">
+                <h3>Matriz Viva: Gesto → Parámetro de Frecuencia</h3>
+                <div class="driver-list" id="synthDriversContainer"></div>
+              </div>
+            </div>
+
+            <!-- TAB 3: PROTOCOLO OSC -->
+            <div class="tab-panel" id="tab-osc">
+              <div class="section-block">
+                <h3>Destino OSC sobre UDP</h3>
+                <p class="hint-text">
+                  El navegador envía la telemetría por WebSocket al puente Node.js local, que la
+                  empaqueta en datagramas binarios <strong>OSC 1.0 UDP</strong> para TouchDesigner,
+                  Max/MSP, Pure Data, Ableton o SuperCollider.
+                </p>
+
+                <div class="osc-target-row">
+                  <label class="field">
+                    <span>IP Destino</span>
+                    <input type="text" id="oscHost" value="127.0.0.1" placeholder="127.0.0.1" />
+                  </label>
+                  <label class="field field-port">
+                    <span>Puerto UDP</span>
+                    <input type="number" id="oscPort" value="9000" min="1" max="65535" />
+                  </label>
+                  <button type="button" class="btn btn-primary" id="btnApplyOsc">Aplicar</button>
+                </div>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Formato de Envío</span>
+                    <select id="oscSendMode">
+                      <option value="bundle">OSC Bundle (#bundle por frame)</option>
+                      <option value="individual">Mensajes Individuales</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Tasa Máxima (Hz)</span>
+                    <select id="oscRateHz">
+                      <option value="60">60 Hz</option>
+                      <option value="30">30 Hz</option>
+                      <option value="15">15 Hz</option>
+                      <option value="0">Sin límite (FPS nativo)</option>
+                    </select>
+                  </label>
+                </div>
+
+                <label class="checkbox-row">
+                  <input type="checkbox" id="chkOscEnabled" checked />
+                  <span>Transmisión OSC Activa</span>
+                </label>
+              </div>
+
+              <div class="section-block">
+                <h3>Canales OSC Activos</h3>
+                <div class="channels-grid">
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanPalm" checked />
+                    <span>Palma, Detección y Orientación (<code>/hand/*/palm/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanFingers" checked />
+                    <span>Dedos Curl, Spread y Pinch (<code>/hand/*/finger/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanPhalanges" checked />
+                    <span>Falanges Individuales (<code>/hand/*/phalanx/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanSynth" checked />
+                    <span>Control Sonoro y Frecuencia (<code>/synth/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanLandmarks" />
+                    <span>21 Landmarks Raw + World (<code>/hand/*/landmark/*</code>)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="section-block">
+                <h3>Diagnóstico y Prueba UDP</h3>
+                <div class="osc-stats-grid">
+                  <div class="summary-cell">
+                    <span>Estado Puente</span>
+                    <strong id="oscBridgeState">Conectando</strong>
+                  </div>
+                  <div class="summary-cell">
+                    <span>Mensajes / seg</span>
+                    <strong id="oscMsgRate">0 msg/s</strong>
+                  </div>
+                  <div class="summary-cell">
+                    <span>Paquetes UDP</span>
+                    <strong id="oscPacketsTotal">0</strong>
+                  </div>
+                  <div class="summary-cell">
+                    <span>Bytes Totales</span>
+                    <strong id="oscBytesTotal">0 B</strong>
+                  </div>
+                </div>
+
+                <div class="osc-test-actions">
+                  <button type="button" class="btn btn-ghost" id="btnSendTestOsc">
+                    Enviar Paquete de Prueba
+                  </button>
+                  <button type="button" class="btn btn-ghost" id="btnLoopbackOsc">
+                    Probar Loopback UDP
+                  </button>
+                </div>
+                <pre class="osc-test-log hidden" id="oscTestResult"></pre>
+                <p class="hint-text">
+                  Tip: Puedes escuchar los paquetes en terminal ejecutando
+                  <code>npm run osc:listen -- 9000</code>
+                </p>
+              </div>
+
+              <div class="section-block">
+                <h3>Monitor OSC en Vivo</h3>
+                <div class="osc-monitor-table" id="oscMonitorList"></div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

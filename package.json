@@ -1,0 +1,38 @@
+{
+  "name": "mediapipe-hand-osc-synth",
+  "version": "1.0.0",
+  "description": "WebApp de tracking de manos, dedos y falanges con MediaPipe, protocolo OSC sobre UDP y control sonoro de frecuencias en tiempo real",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npx tsc --noEmit && npx vite build",
+    "preview": "npx vite preview",
+    "start": "node server/index.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "osc:listen": "node server/osc-listen.mjs",
+    "setup:assets": "node scripts/setup-assets.mjs",
+    "postinstall": "node scripts/setup-assets.mjs"
+  },
+  "keywords": [
+    "mediapipe",
+    "hand-tracking",
+    "phalanges",
+    "osc",
+    "web-audio",
+    "synthesizer",
+    "touchdesigner"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.2.3",
+    "express": "^5.3.0",
+    "osc": "^2.4.5",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
