@@ -12,11 +12,23 @@ import type {
   SynthTelemetry,
   TrackingFrame,
   TrackingSourceMode,
+  TriggerEvaluation,
+  TriggerHandFilter,
+  TriggerMode,
+  TriggerShape,
+  TriggerTarget,
   WaveformType,
 } from './types/hand';
 import { FINGER_SPECS } from './vision/handKinematics';
 import { HandTrackerService } from './vision/handTracker';
 import { renderHandOverlay } from './vision/handRenderer';
+import {
+  TRIGGER_TARGET_LABELS,
+  TriggerZoneEngine,
+  computeContainBox,
+  getZonePixelGeometry,
+  hitTestZoneNormalized,
+} from './vision/triggerZones';
 import { GestureSynthEngine } from './audio/synthEngine';
 import { AudioVisualizer } from './audio/audioVisualizer';
 import { OscBridgeClient } from './osc/oscClient';
@@ -37,6 +49,7 @@ class HandOscApp {
   private synth = new GestureSynthEngine();
   private visualizer = new AudioVisualizer();
   private oscClient = new OscBridgeClient();
+  private triggerEngine = new TriggerZoneEngine();
 
   private sourceMode: TrackingSourceMode = 'camera';
   private cameraActive = false;
@@ -45,6 +58,11 @@ class HandOscApp {
   private showVideo = true;
   private showAngles = true;
   private showIds = false;
+  private showTriggers = true;
+  private editTriggers = false;
+  private selectedTriggerId: string | null = null;
+  private lastVideoAspect = 16 / 9;
+  private lastTriggerValues = new Map<string, number>();
   private inspectPreference: 'auto' | 'left' | 'right' = 'auto';
 
   private simControls: SimulatorControls = {
@@ -135,11 +153,17 @@ class HandOscApp {
     val: HTMLElement;
     bar: HTMLElement;
   }> = [];
+  private triggerRowRefs = new Map<string, { item: HTMLElement; pill: HTMLElement }>();
 
   async boot(): Promise<void> {
     this.buildKinematicsDom();
     this.buildSynthDriverDom();
+    this.selectedTriggerId = this.triggerEngine.getZones()[0]?.id ?? null;
+    this.renderTriggerZonesList();
+    this.syncSelectedTriggerEditor();
     this.bindEvents();
+    this.bindTriggerEvents();
+    this.bindTriggerCanvasInteractions();
     this.syncSynthControlsToDom();
 
     this.oscClient.onStats((stats) => this.updateOscStatsUi(stats));
@@ -503,6 +527,8 @@ class HandOscApp {
     });
 
     const channelBindings: Array<[string, keyof ReturnType<OscBridgeClient['getConfig']>['channels']]> = [
+      ['chkChanTriggers', 'triggers'],
+      ['chkChanTriggerSubchannels', 'triggerSubchannels'],
       ['chkChanPalm', 'palm'],
       ['chkChanFingers', 'fingers'],
       ['chkChanPhalanges', 'phalanges'],
@@ -528,6 +554,412 @@ class HandOscApp {
     byId<HTMLButtonElement>('btnLoopbackOsc').addEventListener('click', () => {
       this.oscClient.runLoopbackTest();
     });
+  }
+
+  private bindTriggerEvents(): void {
+    const chkShowTriggers = byId<HTMLInputElement>('chkShowTriggers');
+    chkShowTriggers.addEventListener('change', () => {
+      this.showTriggers = chkShowTriggers.checked;
+    });
+
+    const btnEditTriggers = byId<HTMLButtonElement>('btnEditTriggers');
+    btnEditTriggers.addEventListener('click', () => {
+      this.editTriggers = !this.editTriggers;
+      btnEditTriggers.classList.toggle('is-active', this.editTriggers);
+      btnEditTriggers.textContent = this.editTriggers ? 'Terminar Edición' : 'Editar Áreas';
+      this.handCanvas.classList.toggle('is-editing', this.editTriggers);
+      if (!this.editTriggers) {
+        this.handCanvas.style.cursor = '';
+      }
+    });
+
+    byId<HTMLButtonElement>('btnAddTrigger').addEventListener('click', () => {
+      const created = this.triggerEngine.addZone();
+      this.selectedTriggerId = created.id;
+      this.renderTriggerZonesList();
+      this.syncSelectedTriggerEditor();
+    });
+
+    const presetSelect = byId<HTMLSelectElement>('triggerPresetSelect');
+    presetSelect.addEventListener('change', () => {
+      const val = presetSelect.value as '' | 'default_2' | 'grid_4' | 'columns_3' | 'clear';
+      if (!val) return;
+      this.triggerEngine.applyPreset(val);
+      this.selectedTriggerId = this.triggerEngine.getZones()[0]?.id ?? null;
+      presetSelect.value = '';
+      this.renderTriggerZonesList();
+      this.syncSelectedTriggerEditor();
+    });
+
+    byId<HTMLButtonElement>('btnTestTriggerNow').addEventListener('click', () => {
+      if (!this.selectedTriggerId) return;
+      this.triggerEngine.manualTestTrigger(this.selectedTriggerId);
+    });
+
+    const updateSelected = (
+      fn: (zoneId: string) => void,
+      refreshList = true,
+      refreshEditor = false
+    ) => {
+      if (!this.selectedTriggerId) return;
+      fn(this.selectedTriggerId);
+      if (refreshList) this.renderTriggerZonesList();
+      if (refreshEditor) this.syncSelectedTriggerEditor();
+    };
+
+    byId<HTMLInputElement>('trgName').addEventListener('input', (e) => {
+      const val = (e.target as HTMLInputElement).value;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { name: val }));
+    });
+    byId<HTMLInputElement>('trgOscAddress').addEventListener('input', (e) => {
+      const val = (e.target as HTMLInputElement).value;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { oscAddress: val }));
+    });
+    byId<HTMLSelectElement>('trgMode').addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as TriggerMode;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { mode }), true, true);
+    });
+    byId<HTMLSelectElement>('trgTarget').addEventListener('change', (e) => {
+      const target = (e.target as HTMLSelectElement).value as TriggerTarget;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { target }));
+    });
+    byId<HTMLSelectElement>('trgHandFilter').addEventListener('change', (e) => {
+      const handFilter = (e.target as HTMLSelectElement).value as TriggerHandFilter;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { handFilter }));
+    });
+    byId<HTMLSelectElement>('trgShape').addEventListener('change', (e) => {
+      const shape = (e.target as HTMLSelectElement).value as TriggerShape;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { shape }), true, true);
+    });
+    byId<HTMLInputElement>('trgColor').addEventListener('input', (e) => {
+      const color = (e.target as HTMLInputElement).value;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { color }));
+    });
+    byId<HTMLInputElement>('chkTrgEnabled').addEventListener('change', (e) => {
+      const enabled = (e.target as HTMLInputElement).checked;
+      updateSelected((id) => this.triggerEngine.updateZone(id, { enabled }));
+    });
+
+    const bindRange = (
+      id: string,
+      labelId: string,
+      formatter: (v: number) => string,
+      apply: (id: string, val: number) => void
+    ) => {
+      byId<HTMLInputElement>(id).addEventListener('input', (e) => {
+        const val = Number((e.target as HTMLInputElement).value);
+        byId<HTMLElement>(labelId).textContent = formatter(val);
+        updateSelected((zoneId) => apply(zoneId, val), false, false);
+      });
+    };
+
+    bindRange('trgX', 'lblTrgX', (v) => v.toFixed(2), (id, x) =>
+      this.triggerEngine.updateZone(id, { x })
+    );
+    bindRange('trgY', 'lblTrgY', (v) => v.toFixed(2), (id, y) =>
+      this.triggerEngine.updateZone(id, { y })
+    );
+    bindRange('trgWidth', 'lblTrgWidth', (v) => v.toFixed(2), (id, width) =>
+      this.triggerEngine.updateZone(id, { width })
+    );
+    bindRange('trgHeight', 'lblTrgHeight', (v) => v.toFixed(2), (id, height) =>
+      this.triggerEngine.updateZone(id, { height })
+    );
+    bindRange('trgPulseMs', 'lblTrgPulseMs', (v) => `${Math.round(v)} ms`, (id, pulseDurationMs) =>
+      this.triggerEngine.updateZone(id, { pulseDurationMs })
+    );
+    bindRange('trgCooldownMs', 'lblTrgCooldownMs', (v) => `${Math.round(v)} ms`, (id, cooldownMs) =>
+      this.triggerEngine.updateZone(id, { cooldownMs })
+    );
+  }
+
+  private bindTriggerCanvasInteractions(): void {
+    type DragState = {
+      mode: 'move' | 'resize';
+      zoneId: string;
+      startX: number;
+      startY: number;
+      origX: number;
+      origY: number;
+      box: ReturnType<typeof computeContainBox>;
+    };
+    let drag: DragState | null = null;
+
+    const getCanvasCoords = (ev: PointerEvent | MouseEvent) => {
+      const rect = this.handCanvas.getBoundingClientRect();
+      return {
+        x: ev.clientX - rect.left,
+        y: ev.clientY - rect.top,
+        w: rect.width,
+        h: rect.height,
+      };
+    };
+
+    this.handCanvas.addEventListener('pointerdown', (ev) => {
+      if (!this.editTriggers) return;
+      const pt = getCanvasCoords(ev);
+      const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
+      const zones = this.triggerEngine.getZones();
+
+      // 1. Verificar manijas de tamaño primero
+      for (let i = zones.length - 1; i >= 0; i--) {
+        const z = zones[i];
+        const geom = getZonePixelGeometry(z, box);
+        const hx = z.shape === 'circle' ? geom.cx + geom.radius : geom.left + geom.w;
+        const hy = z.shape === 'circle' ? geom.cy : geom.top + geom.h;
+        if (Math.hypot(pt.x - hx, pt.y - hy) <= 13) {
+          this.selectedTriggerId = z.id;
+          this.renderTriggerZonesList();
+          this.syncSelectedTriggerEditor();
+          drag = {
+            mode: 'resize',
+            zoneId: z.id,
+            startX: pt.x,
+            startY: pt.y,
+            origX: z.x,
+            origY: z.y,
+            box,
+          };
+          this.handCanvas.setPointerCapture(ev.pointerId);
+          return;
+        }
+      }
+
+      // 2. Verificar cuerpo del pulsador
+      const vx = (pt.x - box.x) / Math.max(box.w, 1);
+      const vy = (pt.y - box.y) / Math.max(box.h, 1);
+      for (let i = zones.length - 1; i >= 0; i--) {
+        const z = zones[i];
+        if (hitTestZoneNormalized(z, vx, vy, this.lastVideoAspect).inside) {
+          this.selectedTriggerId = z.id;
+          this.renderTriggerZonesList();
+          this.syncSelectedTriggerEditor();
+          drag = {
+            mode: 'move',
+            zoneId: z.id,
+            startX: pt.x,
+            startY: pt.y,
+            origX: z.x,
+            origY: z.y,
+            box,
+          };
+          this.handCanvas.setPointerCapture(ev.pointerId);
+          return;
+        }
+      }
+    });
+
+    this.handCanvas.addEventListener('pointermove', (ev) => {
+      if (!this.editTriggers) return;
+      const pt = getCanvasCoords(ev);
+
+      if (drag) {
+        const z = this.triggerEngine.getZone(drag.zoneId);
+        if (!z) return;
+
+        if (drag.mode === 'move') {
+          const dx = (pt.x - drag.startX) / Math.max(drag.box.w, 1);
+          const dy = (pt.y - drag.startY) / Math.max(drag.box.h, 1);
+          this.triggerEngine.updateZone(drag.zoneId, {
+            x: drag.origX + dx,
+            y: drag.origY + dy,
+          });
+        } else {
+          const geom = getZonePixelGeometry(z, drag.box);
+          if (z.shape === 'circle') {
+            const minDim = Math.min(drag.box.w, drag.box.h);
+            const r = Math.hypot(pt.x - geom.cx, pt.y - geom.cy);
+            this.triggerEngine.updateZone(drag.zoneId, {
+              width: (r * 2) / Math.max(minDim, 1),
+            });
+          } else {
+            const halfW = Math.abs(pt.x - geom.cx);
+            const halfH = Math.abs(pt.y - geom.cy);
+            this.triggerEngine.updateZone(drag.zoneId, {
+              width: (halfW * 2) / Math.max(drag.box.w, 1),
+              height: (halfH * 2) / Math.max(drag.box.h, 1),
+            });
+          }
+        }
+        this.syncSelectedTriggerEditor();
+        return;
+      }
+
+      // Actualizar cursor al pasar por encima
+      const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
+      const zones = this.triggerEngine.getZones();
+      let cursor = 'crosshair';
+      const vx = (pt.x - box.x) / Math.max(box.w, 1);
+      const vy = (pt.y - box.y) / Math.max(box.h, 1);
+
+      for (let i = zones.length - 1; i >= 0; i--) {
+        const z = zones[i];
+        const geom = getZonePixelGeometry(z, box);
+        const hx = z.shape === 'circle' ? geom.cx + geom.radius : geom.left + geom.w;
+        const hy = z.shape === 'circle' ? geom.cy : geom.top + geom.h;
+        if (Math.hypot(pt.x - hx, pt.y - hy) <= 13) {
+          cursor = 'nwse-resize';
+          break;
+        }
+        if (hitTestZoneNormalized(z, vx, vy, this.lastVideoAspect).inside) {
+          cursor = 'grab';
+          break;
+        }
+      }
+      this.handCanvas.style.cursor = cursor;
+    });
+
+    const endDrag = (ev: PointerEvent) => {
+      if (!drag) return;
+      drag = null;
+      try {
+        this.handCanvas.releasePointerCapture(ev.pointerId);
+      } catch {
+        // ignore if not captured
+      }
+    };
+    this.handCanvas.addEventListener('pointerup', endDrag);
+    this.handCanvas.addEventListener('pointercancel', endDrag);
+
+    this.handCanvas.addEventListener('dblclick', (ev) => {
+      if (!this.editTriggers) return;
+      const pt = getCanvasCoords(ev);
+      const box = computeContainBox(pt.w, pt.h, this.lastVideoAspect);
+      const vx = (pt.x - box.x) / Math.max(box.w, 1);
+      const vy = (pt.y - box.y) / Math.max(box.h, 1);
+      if (vx < 0 || vx > 1 || vy < 0 || vy > 1) return;
+      const created = this.triggerEngine.addZone({ x: vx, y: vy });
+      this.selectedTriggerId = created.id;
+      this.renderTriggerZonesList();
+      this.syncSelectedTriggerEditor();
+    });
+  }
+
+  private renderTriggerZonesList(): void {
+    const listEl = byId<HTMLElement>('triggerZonesList');
+    const zones = this.triggerEngine.getZones();
+    this.triggerRowRefs.clear();
+
+    if (zones.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'hint-text';
+      empty.textContent = 'No hay pulsadores configurados. Haz clic en "+ Nuevo Pulsador".';
+      listEl.replaceChildren(empty);
+      return;
+    }
+
+    const modeLabels: Record<TriggerMode, string> = {
+      pulse: 'Pulso',
+      momentary: 'Mantener',
+      toggle: 'Toggle',
+    };
+
+    const frag = document.createDocumentFragment();
+    for (const z of zones) {
+      const item = document.createElement('div');
+      item.className = 'trigger-item';
+      if (z.id === this.selectedTriggerId) item.classList.add('is-selected');
+
+      item.addEventListener('click', () => {
+        this.selectedTriggerId = z.id;
+        this.renderTriggerZonesList();
+        this.syncSelectedTriggerEditor();
+      });
+
+      const main = document.createElement('div');
+      main.className = 'trigger-item-main';
+
+      const swatch = document.createElement('span');
+      swatch.className = 'trigger-swatch';
+      swatch.style.background = z.enabled ? z.color : '#475569';
+
+      const meta = document.createElement('div');
+      meta.className = 'trigger-item-meta';
+
+      const name = document.createElement('span');
+      name.className = 'trigger-item-name';
+      name.textContent = z.enabled ? z.name : `${z.name} (desactivado)`;
+
+      const sub = document.createElement('span');
+      sub.className = 'trigger-item-sub';
+      sub.textContent = `${z.oscAddress} · ${modeLabels[z.mode]} · ${TRIGGER_TARGET_LABELS[z.target]}`;
+
+      meta.append(name, sub);
+      main.append(swatch, meta);
+
+      const right = document.createElement('div');
+      right.className = 'trigger-item-right';
+
+      const pill = document.createElement('span');
+      pill.className = 'trigger-state-pill';
+      pill.textContent = '0';
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn-icon-del';
+      delBtn.title = 'Eliminar pulsador';
+      delBtn.textContent = '✕';
+      delBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.triggerEngine.removeZone(z.id);
+        if (this.selectedTriggerId === z.id) {
+          this.selectedTriggerId = this.triggerEngine.getZones()[0]?.id ?? null;
+        }
+        this.renderTriggerZonesList();
+        this.syncSelectedTriggerEditor();
+      });
+
+      right.append(pill, delBtn);
+      item.append(main, right);
+      frag.appendChild(item);
+      this.triggerRowRefs.set(z.id, { item, pill });
+    }
+
+    listEl.replaceChildren(frag);
+  }
+
+  private syncSelectedTriggerEditor(): void {
+    const editorCard = byId<HTMLElement>('triggerEditorCard');
+    const zone = this.selectedTriggerId
+      ? this.triggerEngine.getZone(this.selectedTriggerId)
+      : undefined;
+
+    if (!zone) {
+      editorCard.classList.add('hidden');
+      return;
+    }
+
+    editorCard.classList.remove('hidden');
+    byId<HTMLInputElement>('trgName').value = zone.name;
+    byId<HTMLInputElement>('trgOscAddress').value = zone.oscAddress;
+    byId<HTMLSelectElement>('trgMode').value = zone.mode;
+    byId<HTMLSelectElement>('trgTarget').value = zone.target;
+    byId<HTMLSelectElement>('trgHandFilter').value = zone.handFilter;
+    byId<HTMLSelectElement>('trgShape').value = zone.shape;
+    byId<HTMLInputElement>('trgColor').value = zone.color;
+    byId<HTMLInputElement>('chkTrgEnabled').checked = zone.enabled;
+
+    byId<HTMLInputElement>('trgX').value = zone.x.toFixed(2);
+    byId<HTMLElement>('lblTrgX').textContent = zone.x.toFixed(2);
+    byId<HTMLInputElement>('trgY').value = zone.y.toFixed(2);
+    byId<HTMLElement>('lblTrgY').textContent = zone.y.toFixed(2);
+
+    byId<HTMLInputElement>('trgWidth').value = zone.width.toFixed(2);
+    byId<HTMLElement>('lblTrgWidthTitle').innerHTML =
+      zone.shape === 'circle'
+        ? `Diámetro: <strong id="lblTrgWidth">${zone.width.toFixed(2)}</strong>`
+        : `Ancho: <strong id="lblTrgWidth">${zone.width.toFixed(2)}</strong>`;
+
+    byId<HTMLInputElement>('trgHeight').value = zone.height.toFixed(2);
+    byId<HTMLElement>('lblTrgHeight').textContent = zone.height.toFixed(2);
+    byId<HTMLElement>('fieldTrgHeight').classList.toggle('hidden', zone.shape === 'circle');
+
+    byId<HTMLInputElement>('trgPulseMs').value = String(zone.pulseDurationMs);
+    byId<HTMLElement>('lblTrgPulseMs').textContent = `${zone.pulseDurationMs} ms`;
+    byId<HTMLElement>('fieldTrgPulseMs').classList.toggle('hidden', zone.mode !== 'pulse');
+
+    byId<HTMLInputElement>('trgCooldownMs').value = String(zone.cooldownMs);
+    byId<HTMLElement>('lblTrgCooldownMs').textContent = `${zone.cooldownMs} ms`;
   }
 
   private syncSynthControlsToDom(): void {
@@ -698,15 +1130,22 @@ class HandOscApp {
       };
     }
 
-    // 2. Audio synth update
+    this.lastVideoAspect = videoAspect;
+    const effectiveMirrored = this.sourceMode === 'camera' ? this.mirrored : false;
+
+    // 2. Evaluación espacial de Pulsadores + Audio synth update
+    const triggers = this.triggerEngine.evaluate(frame, effectiveMirrored, videoAspect);
     const synthTelemetry = this.synth.updateFromTracking(frame);
 
-    // 3. Render overlays (Vision + Audio FFT/Oscilloscope)
-    renderHandOverlay(this.handCanvas, frame, synthTelemetry, {
-      mirrored: this.sourceMode === 'camera' ? this.mirrored : false,
+    // 3. Render overlays (Vision + Pulsadores + Audio FFT/Oscilloscope)
+    renderHandOverlay(this.handCanvas, frame, synthTelemetry, triggers, {
+      mirrored: effectiveMirrored,
       showLandmarkIds: this.showIds,
       showPhalanxAngles: this.showAngles,
       showPitchGuides: true,
+      showTriggers: this.showTriggers,
+      editTriggers: this.editTriggers,
+      selectedTriggerId: this.selectedTriggerId,
       videoAspect,
     });
 
@@ -717,15 +1156,24 @@ class HandOscApp {
       synthTelemetry
     );
 
-    // 4. OSC TX
+    // 4. OSC TX (envío inmediato si algún pulsador cambió de estado)
+    let triggerEdge = false;
+    for (const ev of triggers) {
+      const prev = this.lastTriggerValues.get(ev.zone.id);
+      if (ev.justTriggered || (prev !== undefined && prev !== ev.value)) {
+        triggerEdge = true;
+      }
+      this.lastTriggerValues.set(ev.zone.id, ev.value);
+    }
+
     const oscCfg = this.oscClient.getConfig();
-    const oscMessages = buildOscMessages(frame, synthTelemetry, oscCfg.channels);
-    this.oscClient.sendBatch(oscMessages, nowMs);
+    const oscMessages = buildOscMessages(frame, synthTelemetry, oscCfg.channels, triggers);
+    this.oscClient.sendBatch(oscMessages, nowMs, triggerEdge);
 
     // 5. UI telemetry (~30Hz max para DOM liviano, OSC Monitor ~10Hz)
     if (nowMs - this.lastUiTelemetryTime >= 32) {
       this.lastUiTelemetryTime = nowMs;
-      this.updateTelemetryDom(frame, synthTelemetry);
+      this.updateTelemetryDom(frame, synthTelemetry, triggers);
     }
 
     if (nowMs - this.lastOscMonitorTime >= 110) {
@@ -740,7 +1188,18 @@ class HandOscApp {
     return frame.right ?? frame.left ?? null;
   }
 
-  private updateTelemetryDom(frame: TrackingFrame, synth: SynthTelemetry): void {
+  private updateTelemetryDom(
+    frame: TrackingFrame,
+    synth: SynthTelemetry,
+    triggers: TriggerEvaluation[]
+  ): void {
+    for (const ev of triggers) {
+      const ref = this.triggerRowRefs.get(ev.zone.id);
+      if (!ref) continue;
+      ref.item.classList.toggle('is-active', ev.active);
+      ref.pill.textContent = `${ev.value} · #${ev.hitCount}`;
+    }
+
     const count = frame.hands.length;
     this.handsDetectedBadge.textContent =
       count === 1 ? '1 mano detectada' : `${count} manos detectadas`;

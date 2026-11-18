@@ -26,6 +26,8 @@ export class OscBridgeClient {
       phalanges: true,
       landmarks: false,
       synth: true,
+      triggers: true,
+      triggerSubchannels: true,
     },
   };
 
@@ -152,11 +154,11 @@ export class OscBridgeClient {
     );
   }
 
-  sendBatch(messages: OscMessageItem[], nowMs: number): boolean {
+  sendBatch(messages: OscMessageItem[], nowMs: number, forceImmediate = false): boolean {
     if (!this.config.enabled || messages.length === 0) return false;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
 
-    if (this.config.rateHz > 0) {
+    if (!forceImmediate && this.config.rateHz > 0) {
       const minInterval = 1000 / this.config.rateHz;
       if (nowMs - this.lastSentAt < minInterval) return false;
     }

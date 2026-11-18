@@ -7,6 +7,7 @@ import type {
   PinchTarget,
   SynthTelemetry,
   TrackingFrame,
+  TriggerEvaluation,
 } from '../types/hand';
 
 const FINGERS: FingerKey[] = ['thumb', 'index', 'middle', 'ring', 'pinky'];
@@ -121,9 +122,29 @@ function appendHandMessages(
 export function buildOscMessages(
   frame: TrackingFrame,
   synth: SynthTelemetry,
-  channels: OscChannelGroups
+  channels: OscChannelGroups,
+  triggers: TriggerEvaluation[] = []
 ): OscMessageItem[] {
   const messages: OscMessageItem[] = [];
+
+  if (channels.triggers) {
+    for (const ev of triggers) {
+      if (!ev.zone.enabled) continue;
+      const rawAddr = ev.zone.oscAddress.trim() || `/td/pad/${ev.zone.id}`;
+      const baseAddr = rawAddr.startsWith('/') ? rawAddr : `/${rawAddr}`;
+      messages.push({
+        address: baseAddr,
+        args: [iArg(ev.value)],
+      });
+      if (channels.triggerSubchannels) {
+        messages.push(
+          { address: `${baseAddr}/inside`, args: [iArg(ev.inside ? 1 : 0)] },
+          { address: `${baseAddr}/xy`, args: [fArg(ev.localX), fArg(ev.localY)] },
+          { address: `${baseAddr}/count`, args: [iArg(ev.hitCount)] }
+        );
+      }
+    }
+  }
 
   if (channels.palm) {
     messages.push({

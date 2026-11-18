@@ -142,6 +142,56 @@ export interface OscChannelGroups {
   phalanges: boolean;
   landmarks: boolean;
   synth: boolean;
+  triggers: boolean;
+  triggerSubchannels: boolean;
+}
+
+export type TriggerShape = 'rect' | 'circle';
+
+export type TriggerMode = 'momentary' | 'pulse' | 'toggle';
+
+export type TriggerTarget =
+  | 'any_hand'
+  | 'palm'
+  | 'any_tip'
+  | 'index_tip'
+  | 'thumb_tip'
+  | 'middle_tip'
+  | 'ring_tip'
+  | 'pinky_tip'
+  | 'pinch';
+
+export type TriggerHandFilter = 'any' | 'left' | 'right';
+
+export interface TriggerZone {
+  id: string;
+  name: string;
+  enabled: boolean;
+  shape: TriggerShape;
+  x: number; // 0..1 centro X en viewport visual
+  y: number; // 0..1 centro Y en viewport visual
+  width: number; // 0.04..0.90 ancho normalizado (diámetro en círculo)
+  height: number; // 0.04..0.90 alto normalizado (ignorado/igualado en círculo)
+  mode: TriggerMode;
+  pulseDurationMs: number;
+  cooldownMs: number;
+  target: TriggerTarget;
+  handFilter: TriggerHandFilter;
+  oscAddress: string;
+  color: string;
+}
+
+export interface TriggerEvaluation {
+  zone: TriggerZone;
+  inside: boolean;
+  active: boolean;
+  value: 0 | 1;
+  justTriggered: boolean;
+  hitCount: number;
+  hitHand: HandSide | null;
+  localX: number; // 0..1 dentro del área
+  localY: number; // 0..1 dentro del área
+  hitPoints: Array<{ x: number; y: number }>; // puntos visuales en viewport [0..1]
 }
 
 export type OscSendMode = 'bundle' | 'individual';

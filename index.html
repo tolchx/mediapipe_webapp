@@ -81,6 +81,13 @@
                   <input type="checkbox" id="chkSwapHands" />
                   <span>Invertir I/D</span>
                 </label>
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkShowTriggers" checked />
+                  <span>Pulsadores</span>
+                </label>
+                <button type="button" class="btn btn-mini" id="btnEditTriggers" title="Arrastrar y redimensionar pulsadores sobre el video">
+                  Editar Áreas
+                </button>
                 <label class="range-inline" title="Suavizado temporal EMA">
                   <span>Suavizado</span>
                   <input type="range" id="rngSmoothing" min="0.15" max="1" step="0.05" value="0.48" />
@@ -235,6 +242,9 @@
             <button type="button" class="tab-btn active" data-tab="kinematics">
               Dedos y Falanges
             </button>
+            <button type="button" class="tab-btn" data-tab="triggers">
+              Pulsadores (TD)
+            </button>
             <button type="button" class="tab-btn" data-tab="synth">
               Control Sonoro
             </button>
@@ -285,7 +295,136 @@
               </div>
             </div>
 
-            <!-- TAB 2: CONTROL SONORO -->
+            <!-- TAB 2: PULSADORES OSC PARA TOUCHDESIGNER -->
+            <div class="tab-panel" id="tab-triggers">
+              <div class="section-block">
+                <div class="triggers-header-row">
+                  <h3>Zonas / Pulsadores OSC</h3>
+                  <div class="triggers-actions-inline">
+                    <button type="button" class="btn btn-primary btn-mini" id="btnAddTrigger">
+                      + Nuevo Pulsador
+                    </button>
+                    <select id="triggerPresetSelect" class="select-compact" title="Cargar plantilla de zonas">
+                      <option value="">Plantilla...</option>
+                      <option value="default_2">2 Pulsadores (Pulso + Mantener)</option>
+                      <option value="grid_4">4 Pads (Grilla 2×2)</option>
+                      <option value="columns_3">3 Columnas Verticales</option>
+                      <option value="clear">Limpiar todos</option>
+                    </select>
+                  </div>
+                </div>
+                <p class="hint-text">
+                  Activa <strong>Editar Áreas</strong> en el visor para mover y redimensionar cada
+                  pulsador directamente con el mouse sobre la cámara.
+                </p>
+
+                <div class="trigger-list" id="triggerZonesList"></div>
+              </div>
+
+              <div class="section-block" id="triggerEditorCard">
+                <div class="triggers-header-row">
+                  <h3>Configuración del Pulsador</h3>
+                  <button type="button" class="btn btn-ghost btn-mini" id="btnTestTriggerNow">
+                    Disparar Prueba
+                  </button>
+                </div>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Nombre</span>
+                    <input type="text" id="trgName" placeholder="Pulsador 1" />
+                  </label>
+
+                  <label class="field">
+                    <span>Dirección OSC (TD)</span>
+                    <input type="text" id="trgOscAddress" placeholder="/td/pad/1" />
+                  </label>
+
+                  <label class="field">
+                    <span>Tipo de Trigger</span>
+                    <select id="trgMode">
+                      <option value="pulse">Pulso (One-Shot al entrar)</option>
+                      <option value="momentary">Mantener (1 mientras esté dentro)</option>
+                      <option value="toggle">Interruptor (Toggle 0 ↔ 1)</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Elemento Detector</span>
+                    <select id="trgTarget">
+                      <option value="any_hand">Cualquier punto de la mano</option>
+                      <option value="palm">Centro de palma</option>
+                      <option value="any_tip">Cualquier punta de dedo</option>
+                      <option value="index_tip">Punta del Índice (8)</option>
+                      <option value="thumb_tip">Punta del Pulgar (4)</option>
+                      <option value="middle_tip">Punta del Medio (12)</option>
+                      <option value="ring_tip">Punta del Anular (16)</option>
+                      <option value="pinky_tip">Punta del Meñique (20)</option>
+                      <option value="pinch">Pinch Pulgar-Índice activo</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Filtro de Mano</span>
+                    <select id="trgHandFilter">
+                      <option value="any">Cualquier mano (Izq o Der)</option>
+                      <option value="right">Solo Mano Derecha</option>
+                      <option value="left">Solo Mano Izquierda</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Forma del Área</span>
+                    <select id="trgShape">
+                      <option value="rect">Rectángulo</option>
+                      <option value="circle">Círculo</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>Posición X: <strong id="lblTrgX">0.18</strong></span>
+                    <input type="range" id="trgX" min="0.03" max="0.97" step="0.01" value="0.18" />
+                  </label>
+
+                  <label class="field">
+                    <span>Posición Y: <strong id="lblTrgY">0.28</strong></span>
+                    <input type="range" id="trgY" min="0.03" max="0.97" step="0.01" value="0.28" />
+                  </label>
+
+                  <label class="field">
+                    <span id="lblTrgWidthTitle">Ancho: <strong id="lblTrgWidth">0.18</strong></span>
+                    <input type="range" id="trgWidth" min="0.05" max="0.90" step="0.01" value="0.18" />
+                  </label>
+
+                  <label class="field" id="fieldTrgHeight">
+                    <span>Alto: <strong id="lblTrgHeight">0.25</strong></span>
+                    <input type="range" id="trgHeight" min="0.05" max="0.90" step="0.01" value="0.25" />
+                  </label>
+
+                  <label class="field" id="fieldTrgPulseMs">
+                    <span>Duración Pulso: <strong id="lblTrgPulseMs">140 ms</strong></span>
+                    <input type="range" id="trgPulseMs" min="40" max="1000" step="10" value="140" />
+                  </label>
+
+                  <label class="field">
+                    <span>Anti-rebote (Cooldown): <strong id="lblTrgCooldownMs">220 ms</strong></span>
+                    <input type="range" id="trgCooldownMs" min="0" max="1500" step="20" value="220" />
+                  </label>
+
+                  <label class="field">
+                    <span>Color</span>
+                    <input type="color" id="trgColor" value="#22d3ee" />
+                  </label>
+
+                  <label class="checkbox-row field-align-end">
+                    <input type="checkbox" id="chkTrgEnabled" checked />
+                    <span>Pulsador Habilitado</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- TAB 3: CONTROL SONORO -->
             <div class="tab-panel" id="tab-synth">
               <div class="section-block">
                 <h3>Arquitectura de Control de Frecuencias</h3>
@@ -428,6 +567,14 @@
               <div class="section-block">
                 <h3>Canales OSC Activos</h3>
                 <div class="channels-grid">
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanTriggers" checked />
+                    <span>Pulsadores / Zonas TouchDesigner (<code>/td/pad/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkChanTriggerSubchannels" checked />
+                    <span>Subcanales de Pulsadores (<code>/inside</code>, <code>/xy</code>, <code>/count</code>)</span>
+                  </label>
                   <label class="checkbox-row">
                     <input type="checkbox" id="chkChanPalm" checked />
                     <span>Palma, Detección y Orientación (<code>/hand/*/palm/*</code>)</span>

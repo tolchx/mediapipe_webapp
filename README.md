@@ -17,6 +17,15 @@ Aplicación web en tiempo real para rastrear **manos, dedos y cada falange indiv
   - Compatible con TouchDesigner, Max/MSP, Pure Data, Ableton Live, Resolume, SuperCollider y VCV Rack.
   - Soporta modo **OSC Bundle** (`#bundle` atómico por frame en bloques de hasta 16 mensajes) o **Mensajes Individuales**, límite de tasa (`60 Hz`, `30 Hz`, `15 Hz` o nativo), filtrado por grupos de canales, monitor OSC en vivo y prueba integrada de **Loopback UDP**.
 
+- **Sistema de Pulsadores / Zonas Interactivas OSC para TouchDesigner (`Pulsadores (TD)`)**
+  - Crea áreas rectangulares o circulares sobre el visor de cámara y edita su **posición (`X, Y`)**, **tamaño (`Ancho/Alto` o `Diámetro`)**, **dirección OSC personalizada** (ej. `/td/pad/1`), color y filtro de mano (`Cualquiera`, `Derecha`, `Izquierda`).
+  - Soporta **edición directa con mouse sobre el video** (`Editar Áreas`: arrastrar para mover, manija de esquina para redimensionar y doble clic para crear un nuevo pulsador).
+  - **3 tipos de trigger** con anti-rebote (*cooldown*):
+    - **Pulso (`pulse`)**: dispara `1` durante una duración configurable (`40–1000 ms`) al ingresar al área y vuelve a `0`.
+    - **Mantener (`momentary`)**: mantiene `1` mientras la mano o dedo permanezca dentro del área y vuelve a `0` al salir.
+    - **Interruptor (`toggle`)**: alterna `0 ↔ 1` cada vez que el elemento ingresa al área.
+  - Selección del elemento detector: cualquier punto de la mano, centro de palma, cualquier punta de dedo, dedo específico (`Índice`, `Pulgar`, `Medio`, `Anular`, `Meñique`) o pinch activo.
+
 - **Ejemplo de Control Sonoro para Manipular Frecuencias**
   - Sintetizador polivalente basado en **Web Audio API** ([src/audio/synthEngine.ts](src/audio/synthEngine.ts)) con oscilador principal (`sine`, `triangle`, `sawtooth`, `square`), sub-oscilador (`-1` octava), modulador armónico FM, vibrato LFO, filtro paso bajo resonante, delay y compresor limitador.
   - **3 modos de control gestual de frecuencia**:
@@ -134,6 +143,16 @@ Para cada dedo (`thumb`, `index`, `middle`, `ring`, `pinky`) se calculan tres se
 | `/hand/{side}/landmark/{0..20}` | `fff` | Coordenadas normalizadas de imagen `(x, y, z)` |
 | `/hand/{side}/world_landmark/{0..20}` | `fff` | Coordenadas métricas 3D en metros `(x, y, z)` |
 
+### Pulsadores / Zonas TouchDesigner
+Por cada pulsador habilitado (con su dirección configurable `{oscAddress}`, por defecto `/td/pad/1`, `/td/pad/2`, ...):
+
+| Dirección OSC | Tipos | Descripción |
+| :--- | :--- | :--- |
+| `{oscAddress}` | `i` | Estado lógico del pulsador (`1` activo / pulso, `0` inactivo) |
+| `{oscAddress}/inside` | `i` | `1` si el elemento detector está físicamente dentro del área *(subcanal opcional)* |
+| `{oscAddress}/xy` | `ff` | Posición normalizada `(localX, localY)` `0..1` dentro del área *(subcanal opcional)* |
+| `{oscAddress}/count` | `i` | Contador acumulado de activaciones *(subcanal opcional)* |
+
 ### Control Sonoro / Frecuencia
 | Dirección OSC | Tipos | Descripción |
 | :--- | :--- | :--- |
@@ -175,13 +194,15 @@ mediapipe_webapp/
 │   ├── vision/
 │   │   ├── handTracker.ts      # Wrapper de MediaPipe HandLandmarker + simulador
 │   │   ├── handKinematics.ts   # Cálculo 3D de falanges, ángulos, pinch y palma
-│   │   └── handRenderer.ts     # Renderizado del esqueleto y falanges sobre canvas
+│   │   ├── handRenderer.ts     # Renderizado del esqueleto, falanges y pulsadores
+│   │   └── triggerZones.ts     # Motor de zonas/pulsadores (pulso, mantener, toggle)
 │   ├── audio/
 │   │   ├── synthEngine.ts      # Sintetizador Web Audio controlado por gestos
 │   │   └── audioVisualizer.ts  # Visualizador FFT de espectro + osciloscopio
 │   └── osc/
 │       ├── oscClient.ts        # Cliente WebSocket hacia el puente OSC UDP
-│       └── oscProtocol.ts      # Serializador de frames a mensajes OSC
+│       └── oscProtocol.ts      # Serializador de frames y pulsadores a mensajes OSC
 └── tests/
-    └── osc-server.test.mjs     # Test de integración WebSocket -> OSC UDP
+    ├── osc-server.test.mjs     # Test de integración WebSocket -> OSC UDP
+    └── trigger-zones.test.mjs  # Tests unitarios de pulsadores y serialización OSC
 ```

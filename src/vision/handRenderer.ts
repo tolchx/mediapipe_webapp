@@ -1,11 +1,27 @@
-import type { FingerKey, HandKinematics, PhalanxKey, SynthTelemetry, TrackingFrame, Vec3 } from '../types/hand';
+import type {
+  FingerKey,
+  HandKinematics,
+  PhalanxKey,
+  SynthTelemetry,
+  TrackingFrame,
+  TriggerEvaluation,
+  Vec3,
+} from '../types/hand';
 import { FINGER_SPECS } from './handKinematics';
+import {
+  computeContainBox,
+  getZonePixelGeometry,
+  type ViewportBox,
+} from './triggerZones';
 
 export interface RenderOverlayOptions {
   mirrored: boolean;
   showLandmarkIds: boolean;
   showPhalanxAngles: boolean;
   showPitchGuides: boolean;
+  showTriggers: boolean;
+  editTriggers: boolean;
+  selectedTriggerId: string | null;
   videoAspect: number;
 }
 
@@ -38,26 +54,6 @@ function lerpColor(t: number, isLeft: boolean): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-interface ViewportBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-function computeContainBox(canvasW: number, canvasH: number, aspect: number): ViewportBox {
-  const safeAspect = aspect > 0.1 ? aspect : 16 / 9;
-  const canvasAspect = canvasW / Math.max(canvasH, 1);
-  if (canvasAspect > safeAspect) {
-    const h = canvasH;
-    const w = h * safeAspect;
-    return { x: (canvasW - w) / 2, y: 0, w, h };
-  }
-  const w = canvasW;
-  const h = w / safeAspect;
-  return { x: 0, y: (canvasH - h) / 2, w, h };
-}
-
 function projectPoint(p: Vec3, box: ViewportBox, mirrored: boolean): { x: number; y: number } {
   const nx = mirrored ? 1 - p.x : p.x;
   return {
@@ -66,10 +62,20 @@ function projectPoint(p: Vec3, box: ViewportBox, mirrored: boolean): { x: number
   };
 }
 
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace('#', '');
+  if (clean.length !== 6) return `rgba(34, 211, 238, ${alpha})`;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export function renderHandOverlay(
   canvas: HTMLCanvasElement,
   frame: TrackingFrame,
   synth: SynthTelemetry,
+  triggers: TriggerEvaluation[],
   options: RenderOverlayOptions
 ): void {
   const ctx = canvas.getContext('2d');
@@ -93,13 +99,12 @@ export function renderHandOverlay(
 
   const box = computeContainBox(cssW, cssH, options.videoAspect);
 
-  if (options.showPitchGuides) {
-    drawPitchGuideRuler(ctx, box, synth);
+  if (options.showTriggers || options.editTriggers) {
+    drawTriggerZones(ctx, box, triggers, options);
   }
 
-  if (frame.hands.length === 0) {
-    ctx.restore();
-    return;
+  if (options.showPitchGuides) {
+    drawPitchGuideRuler(ctx, box, synth);
   }
 
   for (const hand of frame.hands) {
@@ -107,6 +112,115 @@ export function renderHandOverlay(
   }
 
   ctx.restore();
+}
+
+function drawTriggerZones(
+  ctx: CanvasRenderingContext2D,
+  box: ViewportBox,
+  triggers: TriggerEvaluation[],
+  options: RenderOverlayOptions
+): void {
+  const modeShort: Record<string, string> = {
+    pulse: 'PULSO',
+    momentary: 'HOLD',
+    toggle: 'TOGGLE',
+  };
+
+  for (const ev of triggers) {
+    const { zone } = ev;
+    if (!zone.enabled && !options.editTriggers) continue;
+
+    const geom = getZonePixelGeometry(zone, box);
+    const isSelected = options.editTriggers && zone.id === options.selectedTriggerId;
+    const fillAlpha = !zone.enabled ? 0.04 : ev.active ? 0.34 : ev.inside ? 0.2 : 0.1;
+    const strokeAlpha = !zone.enabled ? 0.3 : ev.active ? 0.98 : isSelected ? 0.95 : 0.65;
+
+    ctx.save();
+    ctx.fillStyle = hexToRgba(zone.color, fillAlpha);
+    ctx.strokeStyle = hexToRgba(zone.color, strokeAlpha);
+    ctx.lineWidth = ev.active ? 2.8 : isSelected ? 2.4 : 1.6;
+
+    if (options.editTriggers && !ev.active) {
+      ctx.setLineDash([6, 4]);
+    }
+
+    ctx.beginPath();
+    if (zone.shape === 'circle') {
+      ctx.arc(geom.cx, geom.cy, geom.radius, 0, Math.PI * 2);
+    } else {
+      ctx.roundRect(geom.left, geom.top, geom.w, geom.h, 10);
+    }
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Halo exterior cuando está activo
+    if (ev.active) {
+      ctx.strokeStyle = hexToRgba(zone.color, 0.38);
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      if (zone.shape === 'circle') {
+        ctx.arc(geom.cx, geom.cy, geom.radius + 4, 0, Math.PI * 2);
+      } else {
+        ctx.roundRect(geom.left - 3, geom.top - 3, geom.w + 6, geom.h + 6, 12);
+      }
+      ctx.stroke();
+    }
+
+    // Etiqueta del pulsador
+    const labelText = `${zone.name} · ${modeShort[zone.mode] || zone.mode}`;
+    const addrText = `${zone.oscAddress} [${ev.value}]`;
+
+    ctx.font = '600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const textW = Math.max(ctx.measureText(labelText).width, ctx.measureText(addrText).width) + 14;
+    const labelX = Math.max(box.x + 4, Math.min(geom.cx - textW * 0.5, box.x + box.w - textW - 4));
+    const labelY = Math.max(box.y + 4, geom.top + 6);
+
+    ctx.fillStyle = 'rgba(7, 10, 15, 0.84)';
+    ctx.beginPath();
+    ctx.roundRect(labelX, labelY, textW, 30, 6);
+    ctx.fill();
+
+    ctx.fillStyle = ev.active ? '#ffffff' : zone.color;
+    ctx.fillText(labelText, labelX + 7, labelY + 12);
+
+    ctx.fillStyle = ev.active ? '#34d399' : '#cbd5e1';
+    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(addrText, labelX + 7, labelY + 24);
+
+    // Puntos de contacto dentro del área
+    for (const pt of ev.hitPoints.slice(0, 5)) {
+      const px = box.x + pt.x * box.w;
+      const py = box.y + pt.y * box.h;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = zone.color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // Manijas de edición (arrastrar centro + redimensionar esquina)
+    if (options.editTriggers) {
+      ctx.fillStyle = isSelected ? '#ffffff' : zone.color;
+      ctx.beginPath();
+      ctx.arc(geom.cx, geom.cy, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      const handleX = zone.shape === 'circle' ? geom.cx + geom.radius : geom.left + geom.w;
+      const handleY = zone.shape === 'circle' ? geom.cy : geom.top + geom.h;
+      ctx.fillStyle = '#0b0e13';
+      ctx.strokeStyle = isSelected ? '#ffffff' : zone.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.rect(handleX - 6, handleY - 6, 12, 12);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
 }
 
 function drawPitchGuideRuler(
