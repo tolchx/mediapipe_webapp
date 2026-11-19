@@ -1,14 +1,18 @@
 import type {
   FingerKey,
+  GestureDetectionFrame,
   HandKinematics,
   OscChannelGroups,
+  OscGesturesChannels,
   OscMessageItem,
+  OscSkeletonChannels,
   PhalanxKey,
   PinchTarget,
   SynthTelemetry,
   TrackingFrame,
   TriggerEvaluation,
 } from '../types/hand';
+import { KEY_POSE_JOINTS } from '../vision/poseKinematics.ts';
 
 const FINGERS: FingerKey[] = ['thumb', 'index', 'middle', 'ring', 'pinky'];
 const PHALANGES: PhalanxKey[] = ['proximal', 'intermediate', 'distal'];
@@ -20,6 +24,10 @@ function fArg(value: number): { type: 'f'; value: number } {
 
 function iArg(value: number): { type: 'i'; value: number } {
   return { type: 'i', value: Math.trunc(value) };
+}
+
+function sArg(value: string): { type: 's'; value: string } {
+  return { type: 's', value: String(value ?? '') };
 }
 
 function appendHandMessages(
@@ -174,6 +182,160 @@ export function buildOscMessages(
       { address: '/synth/lfo_depth', args: [fArg(synth.lfoDepthHz)] },
       { address: '/synth/gain', args: [fArg(synth.gain)] }
     );
+  }
+
+  return messages;
+}
+
+export function buildGestureOscMessages(
+  gestures: GestureDetectionFrame,
+  channels: OscGesturesChannels
+): OscMessageItem[] {
+  const messages: OscMessageItem[] = [];
+
+  messages.push({
+    address: '/gestures/active_count',
+    args: [iArg(gestures.activeCount)],
+  });
+
+  if (channels.sendTopGesture) {
+    messages.push({
+      address: '/gestures/left/top',
+      args: [
+        sArg(gestures.topLeft?.slug ?? 'none'),
+        fArg(gestures.topLeft?.confidence ?? 0),
+      ],
+    });
+    messages.push({
+      address: '/gestures/right/top',
+      args: [
+        sArg(gestures.topRight?.slug ?? 'none'),
+        fArg(gestures.topRight?.confidence ?? 0),
+      ],
+    });
+  }
+
+  for (const g of gestures.items) {
+    if (!g.enabled) continue;
+    if (channels.onlyActiveOrChanged && !g.active) continue;
+
+    messages.push({
+      address: g.oscAddress,
+      args: [iArg(g.active ? 1 : 0)],
+    });
+
+    if (channels.sendScores) {
+      messages.push({
+        address: `/gestures/${g.side}/score/${g.slug}`,
+        args: [fArg(g.confidence)],
+      });
+    }
+  }
+
+  return messages;
+}
+
+export function buildSkeletonOscMessages(
+  frame: TrackingFrame,
+  channels: OscSkeletonChannels
+): OscMessageItem[] {
+  const messages: OscMessageItem[] = [];
+  const detected = frame.poses.length > 0 ? 1 : 0;
+
+  messages.push(
+    { address: '/pose/detected', args: [iArg(detected)] },
+    { address: '/pose/count', args: [iArg(frame.poses.length)] }
+  );
+
+  for (const pose of frame.poses) {
+    const base = `/pose/${pose.id}`;
+
+    if (channels.torsoMetrics) {
+      messages.push(
+        {
+          address: `${base}/center`,
+          args: [fArg(pose.centerOfMass.x), fArg(pose.centerOfMass.y), fArg(pose.centerOfMass.z)],
+        },
+        {
+          address: `${base}/shoulder_center`,
+          args: [
+            fArg(pose.shoulderCenter.x),
+            fArg(pose.shoulderCenter.y),
+            fArg(pose.shoulderCenter.z),
+          ],
+        },
+        {
+          address: `${base}/lean`,
+          args: [
+            fArg(pose.torsoLean.forwardDeg),
+            fArg(pose.torsoLean.lateralDeg),
+            fArg(pose.torsoLean.twistDeg),
+          ],
+        },
+        {
+          address: `${base}/visibility`,
+          args: [fArg(pose.visibilityMean)],
+        }
+      );
+    }
+
+    if (channels.angles) {
+      const a = pose.angles;
+      messages.push(
+        {
+          address: `${base}/angles`,
+          args: [
+            fArg(a.leftElbow),
+            fArg(a.rightElbow),
+            fArg(a.leftShoulder),
+            fArg(a.rightShoulder),
+            fArg(a.leftHip),
+            fArg(a.rightHip),
+            fArg(a.leftKnee),
+            fArg(a.rightKnee),
+          ],
+        },
+        { address: `${base}/angle/left_elbow`, args: [fArg(a.leftElbow)] },
+        { address: `${base}/angle/right_elbow`, args: [fArg(a.rightElbow)] },
+        { address: `${base}/angle/left_shoulder`, args: [fArg(a.leftShoulder)] },
+        { address: `${base}/angle/right_shoulder`, args: [fArg(a.rightShoulder)] },
+        { address: `${base}/angle/left_hip`, args: [fArg(a.leftHip)] },
+        { address: `${base}/angle/right_hip`, args: [fArg(a.rightHip)] },
+        { address: `${base}/angle/left_knee`, args: [fArg(a.leftKnee)] },
+        { address: `${base}/angle/right_knee`, args: [fArg(a.rightKnee)] }
+      );
+    }
+
+    if (channels.namedJoints) {
+      for (const j of KEY_POSE_JOINTS) {
+        const lm = pose.landmarks[j.index];
+        if (!lm) continue;
+        messages.push({
+          address: `${base}/joint/${j.name}`,
+          args: [fArg(lm.x), fArg(lm.y), fArg(lm.z), fArg(lm.visibility ?? 1)],
+        });
+      }
+    }
+
+    if (channels.landmarks) {
+      for (let i = 0; i < pose.landmarks.length; i++) {
+        const lm = pose.landmarks[i];
+        messages.push({
+          address: `${base}/landmark/${i}`,
+          args: [fArg(lm.x), fArg(lm.y), fArg(lm.z), fArg(lm.visibility ?? 1)],
+        });
+      }
+    }
+
+    if (channels.worldLandmarks) {
+      for (let i = 0; i < pose.worldLandmarks.length; i++) {
+        const lm = pose.worldLandmarks[i];
+        messages.push({
+          address: `${base}/world_landmark/${i}`,
+          args: [fArg(lm.x), fArg(lm.y), fArg(lm.z), fArg(lm.visibility ?? 1)],
+        });
+      }
+    }
   }
 
   return messages;

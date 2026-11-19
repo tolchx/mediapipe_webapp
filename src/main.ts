@@ -1,16 +1,19 @@
 import './styles.css';
 import type {
   FingerKey,
+  GestureDetectionFrame,
   HandKinematics,
   OscMessageItem,
   OscStats,
   PhalanxKey,
   PinchTarget,
+  PoseJointAngles,
   ScaleType,
   SimulatorControls,
   SynthMappingMode,
   SynthTelemetry,
   TrackingFrame,
+  TrackingPipelineMode,
   TrackingSourceMode,
   TriggerEvaluation,
   TriggerHandFilter,
@@ -20,7 +23,8 @@ import type {
   WaveformType,
 } from './types/hand';
 import { FINGER_SPECS } from './vision/handKinematics';
-import { HandTrackerService } from './vision/handTracker';
+import { HandTrackerService, type TrackerInitStatus } from './vision/handTracker';
+import { GestureDetectorEngine } from './vision/gestureEngine';
 import { renderHandOverlay, type DraftZoneBox } from './vision/handRenderer';
 import {
   TRIGGER_TARGET_LABELS,
@@ -34,7 +38,12 @@ import {
 import { GestureSynthEngine } from './audio/synthEngine';
 import { AudioVisualizer } from './audio/audioVisualizer';
 import { OscBridgeClient } from './osc/oscClient';
-import { buildOscMessages, formatOscMessagePreview } from './osc/oscProtocol';
+import {
+  buildGestureOscMessages,
+  buildOscMessages,
+  buildSkeletonOscMessages,
+  formatOscMessagePreview,
+} from './osc/oscProtocol';
 
 const FINGER_KEYS: FingerKey[] = ['thumb', 'index', 'middle', 'ring', 'pinky'];
 const PHALANX_KEYS: PhalanxKey[] = ['proximal', 'intermediate', 'distal'];
@@ -48,6 +57,7 @@ function byId<T extends HTMLElement>(id: string): T {
 
 class HandOscApp {
   private tracker = new HandTrackerService();
+  private gestureEngine = new GestureDetectorEngine();
   private synth = new GestureSynthEngine();
   private visualizer = new AudioVisualizer();
   private oscClient = new OscBridgeClient();
@@ -58,6 +68,7 @@ class HandOscApp {
   private cameraStream: MediaStream | null = null;
   private mirrored = true;
   private showVideo = true;
+  private showPoseSkeleton = true;
   private showAngles = true;
   private showIds = false;
   private showTriggers = true;
@@ -68,6 +79,7 @@ class HandOscApp {
   private isDraggingZone = false;
   private lastVideoAspect = 16 / 9;
   private lastTriggerValues = new Map<string, number>();
+  private lastGestureActiveMap = new Map<string, boolean>();
   private inspectPreference: 'auto' | 'left' | 'right' = 'auto';
 
   private simControls: SimulatorControls = {
@@ -143,6 +155,27 @@ class HandOscApp {
   private oscBytesTotal = byId<HTMLElement>('oscBytesTotal');
   private oscTestResult = byId<HTMLElement>('oscTestResult');
   private oscMonitorList = byId<HTMLElement>('oscMonitorList');
+  private mainOscStatusPill = byId<HTMLElement>('mainOscStatusPill');
+
+  private poseStatusBadge = byId<HTMLElement>('poseStatusBadge');
+  private poseVisBadge = byId<HTMLElement>('poseVisBadge');
+  private poseCenterText = byId<HTMLElement>('poseCenterText');
+  private poseLeanText = byId<HTMLElement>('poseLeanText');
+  private skelOscStatusPill = byId<HTMLElement>('skelOscStatusPill');
+  private skelOscMsgRate = byId<HTMLElement>('skelOscMsgRate');
+  private skelOscPacketsTotal = byId<HTMLElement>('skelOscPacketsTotal');
+  private skelOscTestResult = byId<HTMLElement>('skelOscTestResult');
+  private skelOscMonitorList = byId<HTMLElement>('skelOscMonitorList');
+
+  private gesturesActiveBadge = byId<HTMLElement>('gesturesActiveBadge');
+  private topGestureLeftText = byId<HTMLElement>('topGestureLeftText');
+  private topGestureRightText = byId<HTMLElement>('topGestureRightText');
+  private gestureEventLog = byId<HTMLElement>('gestureEventLog');
+  private gestOscStatusPill = byId<HTMLElement>('gestOscStatusPill');
+  private gestOscMsgRate = byId<HTMLElement>('gestOscMsgRate');
+  private gestOscPacketsTotal = byId<HTMLElement>('gestOscPacketsTotal');
+  private gestOscTestResult = byId<HTMLElement>('gestOscTestResult');
+  private gestOscMonitorList = byId<HTMLElement>('gestOscMonitorList');
 
   // Pre-built fast meter refs
   private pinchRefs = new Map<
@@ -154,6 +187,17 @@ class HandOscApp {
     string,
     { val: HTMLElement; bar: HTMLElement }
   >();
+  private poseAngleRefs = new Map<keyof PoseJointAngles, { val: HTMLElement; bar: HTMLElement }>();
+  private gestureRowRefs = new Map<
+    string,
+    {
+      row: HTMLElement;
+      side: string;
+      chk: HTMLInputElement;
+      scoreVal: HTMLElement;
+      bar: HTMLElement;
+    }
+  >();
   private driverRefs: Array<{
     key: 'pitch' | 'cutoff' | 'fm' | 'lfo' | 'sub';
     label: HTMLElement;
@@ -164,6 +208,8 @@ class HandOscApp {
 
   async boot(): Promise<void> {
     this.buildKinematicsDom();
+    this.buildPoseAnglesDom();
+    this.buildGesturesDom();
     this.buildSynthDriverDom();
     this.selectedTriggerId = this.triggerEngine.getZones()[0]?.id ?? null;
     this.renderTriggerZonesList();
@@ -171,6 +217,8 @@ class HandOscApp {
     this.bindEvents();
     this.bindTriggerEvents();
     this.bindTriggerCanvasInteractions();
+    this.bindSkeletonModuleEvents();
+    this.bindGesturesModuleEvents();
     this.syncSynthControlsToDom();
 
     this.oscClient.onStats((stats) => this.updateOscStatsUi(stats));
@@ -185,23 +233,33 @@ class HandOscApp {
       }
     });
     this.oscClient.onTestPacketSent((info) => {
-      this.oscTestResult.classList.remove('hidden');
-      this.oscTestResult.textContent = `[TX Test OK] Enviados ${info.count} mensajes OSC a ${info.host}:${info.port}`;
+      const targetEl =
+        info.module === 'gestures'
+          ? this.gestOscTestResult
+          : info.module === 'skeleton'
+            ? this.skelOscTestResult
+            : this.oscTestResult;
+      targetEl.classList.remove('hidden');
+      targetEl.textContent = `[TX Test OK] Enviados ${info.count} mensajes OSC a ${info.host}:${info.port}`;
     });
     this.oscClient.connect();
 
     this.startMainLoop();
 
-    // Inicializar MediaPipe HandLandmarker en segundo plano
+    // Inicializar MediaPipe (GestureRecognizer + PoseLandmarker) en segundo plano
     const status = await this.tracker.init((s) => this.updateMpStatus(s));
     this.updateMpStatus(status);
     await this.refreshCameraDevices();
   }
 
-  private updateMpStatus(status: { ready: boolean; delegate: 'GPU' | 'CPU' | null; error: string | null }): void {
+  private updateMpStatus(status: TrackerInitStatus): void {
     if (status.ready) {
       this.mpStatusDot.className = 'dot dot-ok';
-      this.mpStatusText.textContent = `MediaPipe: Listo (${status.delegate})`;
+      const parts: string[] = [];
+      if (status.gesturesReady) parts.push('Gestos');
+      else if (status.handsReady) parts.push('Manos');
+      if (status.poseReady) parts.push('Pose');
+      this.mpStatusText.textContent = `MediaPipe: Listo (${status.delegate} · ${parts.join(' + ')})`;
     } else if (status.error) {
       this.mpStatusDot.className = 'dot dot-err';
       this.mpStatusText.textContent = `MediaPipe Error`;
@@ -211,6 +269,119 @@ class HandOscApp {
       this.mpStatusDot.className = 'dot dot-warn';
       this.mpStatusText.textContent = 'MediaPipe: Cargando...';
     }
+  }
+
+  private buildPoseAnglesDom(): void {
+    const grid = byId<HTMLElement>('poseAnglesGrid');
+    const joints: Array<{ key: keyof PoseJointAngles; label: string }> = [
+      { key: 'leftElbow', label: 'Codo Izquierdo' },
+      { key: 'rightElbow', label: 'Codo Derecho' },
+      { key: 'leftShoulder', label: 'Hombro Izquierdo' },
+      { key: 'rightShoulder', label: 'Hombro Derecho' },
+      { key: 'leftHip', label: 'Cadera Izquierda' },
+      { key: 'rightHip', label: 'Cadera Derecha' },
+      { key: 'leftKnee', label: 'Rodilla Izquierda' },
+      { key: 'rightKnee', label: 'Rodilla Derecha' },
+    ];
+
+    for (const j of joints) {
+      const card = document.createElement('div');
+      card.className = 'pose-angle-card';
+      const head = document.createElement('div');
+      head.className = 'pose-angle-head';
+      const lbl = document.createElement('span');
+      lbl.textContent = j.label;
+      const val = document.createElement('strong');
+      val.textContent = '180°';
+      head.append(lbl, val);
+
+      const track = document.createElement('div');
+      track.className = 'meter-track';
+      const bar = document.createElement('div');
+      bar.className = 'meter-fill fill-driver';
+      track.appendChild(bar);
+
+      card.append(head, track);
+      grid.appendChild(card);
+      this.poseAngleRefs.set(j.key, { val, bar });
+    }
+  }
+
+  private buildGesturesDom(): void {
+    const container = byId<HTMLElement>('gestureListContainer');
+    const initial = this.gestureEngine.evaluate({
+      timestamp: 0,
+      source: 'camera',
+      hands: [],
+      left: null,
+      right: null,
+      poses: [],
+      rawGestures: [],
+    });
+
+    const sourceNames: Record<string, string> = {
+      mediapipe: 'MediaPipe',
+      hand_kinematic: 'Mano 3D',
+      pose: 'Pose',
+    };
+
+    const frag = document.createDocumentFragment();
+    for (const item of initial.items) {
+      const row = document.createElement('div');
+      row.className = 'gesture-row';
+      if (!item.enabled) row.classList.add('is-disabled');
+
+      const top = document.createElement('div');
+      top.className = 'gesture-row-top';
+
+      const left = document.createElement('div');
+      left.className = 'gesture-row-left';
+
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.checked = item.enabled;
+      chk.title = 'Incluir gesto en salida OSC';
+      chk.addEventListener('change', () => {
+        this.gestureEngine.setGestureEnabled(item.id, chk.checked);
+        row.classList.toggle('is-disabled', !chk.checked);
+      });
+
+      const title = document.createElement('span');
+      title.className = 'gesture-title';
+      title.textContent = item.label;
+      title.title = item.description;
+
+      const srcPill = document.createElement('span');
+      srcPill.className = 'gesture-source-pill';
+      srcPill.textContent = sourceNames[item.source] ?? item.source;
+
+      left.append(chk, title, srcPill);
+
+      const right = document.createElement('div');
+      right.className = 'gesture-row-right';
+      const scoreVal = document.createElement('span');
+      scoreVal.className = 'gesture-score-val';
+      scoreVal.textContent = '0% · #0';
+      right.appendChild(scoreVal);
+
+      top.append(left, right);
+
+      const track = document.createElement('div');
+      track.className = 'meter-track';
+      const bar = document.createElement('div');
+      bar.className = 'meter-fill fill-pinch';
+      track.appendChild(bar);
+
+      const addr = document.createElement('span');
+      addr.className = 'gesture-osc-addr';
+      addr.textContent = item.oscAddress;
+
+      row.append(top, track, addr);
+      frag.appendChild(row);
+      this.gestureRowRefs.set(item.id, { row, side: item.side, chk, scoreVal, bar });
+    }
+
+    container.replaceChildren(frag);
   }
 
   private buildKinematicsDom(): void {
@@ -361,6 +532,10 @@ class HandOscApp {
     });
 
     // Stage Toggles
+    byId<HTMLSelectElement>('pipelineModeSelect').addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as TrackingPipelineMode;
+      this.tracker.setPipelineMode(mode);
+    });
     byId<HTMLInputElement>('chkMirror').addEventListener('change', (e) => {
       this.mirrored = (e.target as HTMLInputElement).checked;
       this.videoEl.classList.toggle('mirrored', this.mirrored);
@@ -368,6 +543,9 @@ class HandOscApp {
     byId<HTMLInputElement>('chkShowVideo').addEventListener('change', (e) => {
       this.showVideo = (e.target as HTMLInputElement).checked;
       this.videoEl.classList.toggle('video-hidden', !this.showVideo);
+    });
+    byId<HTMLInputElement>('chkShowPose').addEventListener('change', (e) => {
+      this.showPoseSkeleton = (e.target as HTMLInputElement).checked;
     });
     byId<HTMLInputElement>('chkShowAngles').addEventListener('change', (e) => {
       this.showAngles = (e.target as HTMLInputElement).checked;
@@ -563,7 +741,7 @@ class HandOscApp {
 
     byId<HTMLButtonElement>('btnSendTestOsc').addEventListener('click', () => {
       applyOscTarget();
-      if (!this.oscClient.sendTestPacket()) {
+      if (!this.oscClient.sendTestPacket('main')) {
         this.oscTestResult.classList.remove('hidden');
         this.oscTestResult.textContent =
           '[Modo Web] No hay puente UDP conectado. Para enviar datagramas OSC reales a TouchDesigner, ejecuta el servidor local (npm start) o conecta un puente WebSocket local.';
@@ -574,6 +752,149 @@ class HandOscApp {
         this.oscTestResult.classList.remove('hidden');
         this.oscTestResult.textContent =
           '[Modo Web] El loopback UDP requiere el puente Node.js local activo (npm start).';
+      }
+    });
+  }
+
+  private bindSkeletonModuleEvents(): void {
+    const applySkelTarget = () => {
+      const host = byId<HTMLInputElement>('skelOscHost').value.trim() || '127.0.0.1';
+      const port = Math.max(
+        1,
+        Math.min(65535, Number(byId<HTMLInputElement>('skelOscPort').value) || 9002)
+      );
+      byId<HTMLInputElement>('skelOscPort').value = String(port);
+      this.oscClient.updateSkeletonConfig({ host, port });
+      this.skelOscStatusPill.textContent = `Puerto ${port}`;
+    };
+
+    byId<HTMLButtonElement>('btnApplySkelOsc').addEventListener('click', applySkelTarget);
+    byId<HTMLSelectElement>('skelOscSendMode').addEventListener('change', (e) => {
+      this.oscClient.updateSkeletonConfig({
+        sendMode: (e.target as HTMLSelectElement).value as 'bundle' | 'individual',
+      });
+    });
+    byId<HTMLSelectElement>('skelOscRateHz').addEventListener('change', (e) => {
+      this.oscClient.updateSkeletonConfig({
+        rateHz: Number((e.target as HTMLSelectElement).value),
+      });
+    });
+    byId<HTMLInputElement>('chkSkelOscEnabled').addEventListener('change', (e) => {
+      this.oscClient.updateSkeletonConfig({
+        enabled: (e.target as HTMLInputElement).checked,
+      });
+    });
+
+    const skelChannels: Array<
+      [string, keyof ReturnType<OscBridgeClient['getSkeletonConfig']>['channels']]
+    > = [
+      ['chkSkelChanJoints', 'namedJoints'],
+      ['chkSkelChanAngles', 'angles'],
+      ['chkSkelChanTorso', 'torsoMetrics'],
+      ['chkSkelChanLandmarks', 'landmarks'],
+      ['chkSkelChanWorld', 'worldLandmarks'],
+    ];
+    for (const [id, key] of skelChannels) {
+      byId<HTMLInputElement>(id).addEventListener('change', (e) => {
+        const cur = this.oscClient.getSkeletonConfig().channels;
+        this.oscClient.updateSkeletonConfig({
+          channels: { ...cur, [key]: (e.target as HTMLInputElement).checked },
+        });
+      });
+    }
+
+    byId<HTMLButtonElement>('btnTestSkelOsc').addEventListener('click', () => {
+      applySkelTarget();
+      if (!this.oscClient.sendTestPacket('skeleton')) {
+        this.skelOscTestResult.classList.remove('hidden');
+        this.skelOscTestResult.textContent =
+          '[Modo Web] Conecta el puente Node.js local para enviar OSC de Esqueleto por UDP.';
+      }
+    });
+  }
+
+  private bindGesturesModuleEvents(): void {
+    const filterButtons = document.querySelectorAll<HTMLButtonElement>('[data-gfilter]');
+    filterButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const f = (btn.dataset.gfilter || 'all') as 'all' | 'right' | 'left' | 'body';
+        filterButtons.forEach((b) => b.classList.toggle('active', b === btn));
+        for (const ref of this.gestureRowRefs.values()) {
+          const visible = f === 'all' || ref.side === f;
+          ref.row.classList.toggle('hidden', !visible);
+        }
+      });
+    });
+
+    byId<HTMLButtonElement>('btnGestEnableAll').addEventListener('click', () => {
+      this.gestureEngine.setAllEnabled(true);
+      for (const ref of this.gestureRowRefs.values()) {
+        ref.chk.checked = true;
+        ref.row.classList.remove('is-disabled');
+      }
+    });
+    byId<HTMLButtonElement>('btnGestDisableAll').addEventListener('click', () => {
+      this.gestureEngine.setAllEnabled(false);
+      for (const ref of this.gestureRowRefs.values()) {
+        ref.chk.checked = false;
+        ref.row.classList.add('is-disabled');
+      }
+    });
+    byId<HTMLButtonElement>('btnClearGestureEvents').addEventListener('click', () => {
+      this.gestureEngine.clearEvents();
+      this.gestureEventLog.replaceChildren();
+    });
+
+    const applyGestTarget = () => {
+      const host = byId<HTMLInputElement>('gestOscHost').value.trim() || '127.0.0.1';
+      const port = Math.max(
+        1,
+        Math.min(65535, Number(byId<HTMLInputElement>('gestOscPort').value) || 9001)
+      );
+      byId<HTMLInputElement>('gestOscPort').value = String(port);
+      this.oscClient.updateGesturesConfig({ host, port });
+      this.gestOscStatusPill.textContent = `Puerto ${port}`;
+    };
+
+    byId<HTMLButtonElement>('btnApplyGestOsc').addEventListener('click', applyGestTarget);
+    byId<HTMLSelectElement>('gestOscSendMode').addEventListener('change', (e) => {
+      this.oscClient.updateGesturesConfig({
+        sendMode: (e.target as HTMLSelectElement).value as 'bundle' | 'individual',
+      });
+    });
+    byId<HTMLSelectElement>('gestOscRateHz').addEventListener('change', (e) => {
+      this.oscClient.updateGesturesConfig({
+        rateHz: Number((e.target as HTMLSelectElement).value),
+      });
+    });
+    byId<HTMLInputElement>('chkGestOscEnabled').addEventListener('change', (e) => {
+      this.oscClient.updateGesturesConfig({
+        enabled: (e.target as HTMLInputElement).checked,
+      });
+    });
+
+    const gestChannels: Array<
+      [string, keyof ReturnType<OscBridgeClient['getGesturesConfig']>['channels']]
+    > = [
+      ['chkGestChanTop', 'sendTopGesture'],
+      ['chkGestChanScores', 'sendScores'],
+      ['chkGestChanOnlyActive', 'onlyActiveOrChanged'],
+    ];
+    for (const [id, key] of gestChannels) {
+      byId<HTMLInputElement>(id).addEventListener('change', (e) => {
+        const cur = this.oscClient.getGesturesConfig().channels;
+        this.oscClient.updateGesturesConfig({
+          channels: { ...cur, [key]: (e.target as HTMLInputElement).checked },
+        });
+      });
+    }
+
+    byId<HTMLButtonElement>('btnTestGestOsc').addEventListener('click', () => {
+      applyGestTarget();
+      if (!this.oscClient.sendTestPacket('gestures')) {
+        this.gestOscTestResult.classList.remove('hidden');
+        this.gestOscTestResult.textContent =
+          '[Modo Web] Conecta el puente Node.js local para enviar OSC de Gestos por UDP.';
       }
     });
   }
@@ -1431,23 +1752,27 @@ class HandOscApp {
         hands: [],
         left: null,
         right: null,
+        poses: [],
+        rawGestures: [],
       };
     }
 
     this.lastVideoAspect = videoAspect;
     const effectiveMirrored = this.sourceMode === 'camera' ? this.mirrored : false;
 
-    // 2. Evaluación espacial de Pulsadores + Audio synth update
+    // 2. Evaluación espacial de Pulsadores, Gestos y Síntesis Sonora
     const triggers = this.triggerEngine.evaluate(frame, effectiveMirrored, videoAspect);
+    const gestures = this.gestureEngine.evaluate(frame);
     const synthTelemetry = this.synth.updateFromTracking(frame);
 
-    // 3. Render overlays (Vision + Pulsadores + Audio FFT/Oscilloscope)
-    renderHandOverlay(this.handCanvas, frame, synthTelemetry, triggers, {
+    // 3. Render overlays (Pose + Manos + Pulsadores + Audio FFT/Oscilloscope)
+    renderHandOverlay(this.handCanvas, frame, synthTelemetry, triggers, gestures, {
       mirrored: effectiveMirrored,
       showLandmarkIds: this.showIds,
       showPhalanxAngles: this.showAngles,
       showPitchGuides: true,
       showTriggers: this.showTriggers,
+      showPoseSkeleton: this.showPoseSkeleton,
       editTriggers: this.editTriggers,
       selectedTriggerId: this.selectedTriggerId,
       hoveredTriggerId: this.hoveredTriggerId,
@@ -1462,7 +1787,7 @@ class HandOscApp {
       synthTelemetry
     );
 
-    // 4. OSC TX (envío inmediato si algún pulsador cambió de estado)
+    // 4. OSC TX en 3 módulos independientes (Principal :9000, Gestos :9001, Esqueleto :9002)
     let triggerEdge = false;
     for (const ev of triggers) {
       const prev = this.lastTriggerValues.get(ev.zone.id);
@@ -1472,19 +1797,45 @@ class HandOscApp {
       this.lastTriggerValues.set(ev.zone.id, ev.value);
     }
 
-    const oscCfg = this.oscClient.getConfig();
-    const oscMessages = buildOscMessages(frame, synthTelemetry, oscCfg.channels, triggers);
-    this.oscClient.sendBatch(oscMessages, nowMs, triggerEdge);
+    let gestureEdge = false;
+    for (const g of gestures.items) {
+      const prev = this.lastGestureActiveMap.get(g.id);
+      if (prev !== undefined && prev !== g.active) {
+        gestureEdge = true;
+      }
+      this.lastGestureActiveMap.set(g.id, g.active);
+    }
 
-    // 5. UI telemetry (~30Hz max para DOM liviano, OSC Monitor ~10Hz)
+    const mainMessages = buildOscMessages(
+      frame,
+      synthTelemetry,
+      this.oscClient.getConfig().channels,
+      triggers
+    );
+    const gestureMessages = buildGestureOscMessages(
+      gestures,
+      this.oscClient.getGesturesConfig().channels
+    );
+    const skeletonMessages = buildSkeletonOscMessages(
+      frame,
+      this.oscClient.getSkeletonConfig().channels
+    );
+
+    this.oscClient.sendBatch(mainMessages, nowMs, triggerEdge, 'main');
+    this.oscClient.sendBatch(gestureMessages, nowMs, gestureEdge, 'gestures');
+    this.oscClient.sendBatch(skeletonMessages, nowMs, false, 'skeleton');
+
+    // 5. UI telemetry (~30Hz max para DOM liviano, OSC Monitores ~10Hz)
     if (nowMs - this.lastUiTelemetryTime >= 32) {
       this.lastUiTelemetryTime = nowMs;
-      this.updateTelemetryDom(frame, synthTelemetry, triggers);
+      this.updateTelemetryDom(frame, synthTelemetry, triggers, gestures);
     }
 
     if (nowMs - this.lastOscMonitorTime >= 110) {
       this.lastOscMonitorTime = nowMs;
-      this.updateOscMonitorDom(oscMessages);
+      this.renderOscMonitor(this.oscMonitorList, mainMessages);
+      this.renderOscMonitor(this.gestOscMonitorList, gestureMessages);
+      this.renderOscMonitor(this.skelOscMonitorList, skeletonMessages);
     }
   }
 
@@ -1497,7 +1848,8 @@ class HandOscApp {
   private updateTelemetryDom(
     frame: TrackingFrame,
     synth: SynthTelemetry,
-    triggers: TriggerEvaluation[]
+    triggers: TriggerEvaluation[],
+    gestures: GestureDetectionFrame
   ): void {
     for (const ev of triggers) {
       const ref = this.triggerRowRefs.get(ev.zone.id);
@@ -1506,9 +1858,66 @@ class HandOscApp {
       ref.pill.textContent = `${ev.value} · #${ev.hitCount}`;
     }
 
+    // Gesture list DOM update
+    this.gesturesActiveBadge.textContent =
+      gestures.activeCount === 1 ? '1 activo' : `${gestures.activeCount} activos`;
+    this.topGestureLeftText.textContent = gestures.topLeft
+      ? `${gestures.topLeft.label} (${Math.round(gestures.topLeft.confidence * 100)}%)`
+      : '—';
+    this.topGestureRightText.textContent = gestures.topRight
+      ? `${gestures.topRight.label} (${Math.round(gestures.topRight.confidence * 100)}%)`
+      : '—';
+
+    for (const item of gestures.items) {
+      const ref = this.gestureRowRefs.get(item.id);
+      if (!ref) continue;
+      ref.row.classList.toggle('is-active', item.active);
+      const pct = Math.round(item.confidence * 100);
+      ref.scoreVal.textContent = `${pct}% · #${item.hitCount}`;
+      ref.bar.style.width = `${pct}%`;
+    }
+
+    const evFrag = document.createDocumentFragment();
+    for (const ev of gestures.recentEvents.slice(0, 8)) {
+      const row = document.createElement('div');
+      row.className = 'gesture-event-row';
+      const left = document.createElement('span');
+      left.textContent = `${ev.label} (${Math.round(ev.confidence * 100)}%)`;
+      const right = document.createElement('span');
+      right.textContent = ev.oscAddress;
+      row.append(left, right);
+      evFrag.appendChild(row);
+    }
+    this.gestureEventLog.replaceChildren(evFrag);
+
+    // Pose skeleton DOM update
+    const pose = frame.poses[0];
+    if (!pose) {
+      this.poseStatusBadge.textContent = 'Sin cuerpo detectado';
+      this.poseVisBadge.textContent = 'Visibilidad 0%';
+      this.poseCenterText.textContent = '—';
+      this.poseLeanText.textContent = '0° / 0° / 0°';
+      for (const ref of this.poseAngleRefs.values()) {
+        ref.val.textContent = '180°';
+        ref.bar.style.width = '0%';
+      }
+    } else {
+      this.poseStatusBadge.textContent = `Cuerpo detectado (${frame.poses.length})`;
+      this.poseVisBadge.textContent = `Visibilidad ${Math.round(pose.visibilityMean * 100)}%`;
+      this.poseCenterText.textContent = `${pose.centerOfMass.x.toFixed(2)}, ${pose.centerOfMass.y.toFixed(2)}, ${pose.centerOfMass.z.toFixed(2)}`;
+      this.poseLeanText.textContent = `${Math.round(pose.torsoLean.forwardDeg)}° / ${Math.round(pose.torsoLean.lateralDeg)}° / ${Math.round(pose.torsoLean.twistDeg)}°`;
+      for (const [k, ref] of this.poseAngleRefs.entries()) {
+        const deg = pose.angles[k];
+        ref.val.textContent = `${Math.round(deg)}°`;
+        const flexPct = Math.round(Math.max(0, Math.min(1, (180 - deg) / 140)) * 100);
+        ref.bar.style.width = `${flexPct}%`;
+      }
+    }
+
     const count = frame.hands.length;
-    this.handsDetectedBadge.textContent =
-      count === 1 ? '1 mano detectada' : `${count} manos detectadas`;
+    const handLabel = count === 1 ? '1 mano' : `${count} manos`;
+    const poseLabel = frame.poses.length > 0 ? 'Pose OK' : 'Sin pose';
+    this.handsDetectedBadge.textContent = `${handLabel} · ${poseLabel}`;
 
     // Synth readouts
     const freqText = `${synth.quantizedFreqHz.toFixed(1)} Hz`;
@@ -1604,7 +2013,11 @@ class HandOscApp {
   }
 
   private updateOscStatsUi(stats: OscStats): void {
-    const oscEnabled = this.oscClient.getConfig().enabled;
+    const mainCfg = this.oscClient.getConfig();
+    const gestCfg = this.oscClient.getGesturesConfig();
+    const skelCfg = this.oscClient.getSkeletonConfig();
+    const anyEnabled = mainCfg.enabled || gestCfg.enabled || skelCfg.enabled;
+
     this.oscBridgeRow.classList.toggle('hidden', stats.bridgeMode === 'connected');
 
     if (stats.bridgeMode === 'standalone' && !stats.wsConnected) {
@@ -1627,29 +2040,47 @@ class HandOscApp {
       this.oscStatusDot.className = 'dot dot-err';
       this.oscStatusText.textContent = `OSC Error: ${stats.lastError}`;
       this.oscBridgeState.textContent = `Error: ${stats.lastError}`;
-    } else if (!oscEnabled) {
+    } else if (!anyEnabled) {
       this.oscStatusDot.className = 'dot dot-warn';
-      this.oscStatusText.textContent = `OSC: Pausado (${stats.targetHost}:${stats.targetPort})`;
+      this.oscStatusText.textContent = 'OSC: Módulos pausados';
       this.oscBridgeState.textContent = 'Pausado';
     } else {
+      const ports: string[] = [];
+      if (mainCfg.enabled) ports.push(String(stats.modules.main.targetPort));
+      if (gestCfg.enabled) ports.push(String(stats.modules.gestures.targetPort));
+      if (skelCfg.enabled) ports.push(String(stats.modules.skeleton.targetPort));
       this.oscStatusDot.className = 'dot dot-ok';
-      this.oscStatusText.textContent = `OSC ${stats.targetHost}:${stats.targetPort} · ${stats.messagesPerSec} msg/s`;
-      this.oscBridgeState.textContent = `UDP Activo (${stats.sendMode})`;
+      this.oscStatusText.textContent = `OSC [${ports.join(' | ')}] · ${stats.messagesPerSec} msg/s`;
+      this.oscBridgeState.textContent = mainCfg.enabled
+        ? `UDP Activo (${stats.modules.main.sendMode})`
+        : 'Pausado';
     }
 
-    this.oscMsgRate.textContent = `${stats.messagesPerSec} msg/s`;
-    this.oscPacketsTotal.textContent = stats.packetsSent.toLocaleString('es-ES');
+    const mMain = stats.modules.main;
+    const mGest = stats.modules.gestures;
+    const mSkel = stats.modules.skeleton;
+
+    this.mainOscStatusPill.textContent = `Puerto ${mMain.targetPort}`;
+    this.oscMsgRate.textContent = `${mMain.messagesPerSec} msg/s`;
+    this.oscPacketsTotal.textContent = mMain.packetsSent.toLocaleString('es-ES');
     this.oscBytesTotal.textContent =
-      stats.bytesSent > 1024 * 1024
-        ? `${(stats.bytesSent / (1024 * 1024)).toFixed(2)} MB`
-        : stats.bytesSent > 1024
-          ? `${(stats.bytesSent / 1024).toFixed(1)} KB`
-          : `${stats.bytesSent} B`;
+      mMain.bytesSent > 1024 * 1024
+        ? `${(mMain.bytesSent / (1024 * 1024)).toFixed(2)} MB`
+        : mMain.bytesSent > 1024
+          ? `${(mMain.bytesSent / 1024).toFixed(1)} KB`
+          : `${mMain.bytesSent} B`;
+
+    this.gestOscStatusPill.textContent = `Puerto ${mGest.targetPort}`;
+    this.gestOscMsgRate.textContent = `${mGest.messagesPerSec} msg/s`;
+    this.gestOscPacketsTotal.textContent = mGest.packetsSent.toLocaleString('es-ES');
+
+    this.skelOscStatusPill.textContent = `Puerto ${mSkel.targetPort}`;
+    this.skelOscMsgRate.textContent = `${mSkel.messagesPerSec} msg/s`;
+    this.skelOscPacketsTotal.textContent = mSkel.packetsSent.toLocaleString('es-ES');
   }
 
-  private updateOscMonitorDom(messages: OscMessageItem[]): void {
-    // Mostrar hasta 42 mensajes representativos en el monitor en vivo sin saturar el DOM
-    const maxRows = 42;
+  private renderOscMonitor(container: HTMLElement, messages: OscMessageItem[]): void {
+    const maxRows = 38;
     const slice = messages.slice(0, maxRows);
     const frag = document.createDocumentFragment();
 
@@ -1683,7 +2114,7 @@ class HandOscApp {
       frag.appendChild(more);
     }
 
-    this.oscMonitorList.replaceChildren(frag);
+    container.replaceChildren(frag);
   }
 
   dispose(): void {

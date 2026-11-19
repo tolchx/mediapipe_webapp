@@ -79,6 +79,8 @@ export const TRIGGER_TARGET_LABELS: Record<TriggerTarget, string> = {
   ring_tip: 'Punta del Anular (16)',
   pinky_tip: 'Punta del Meñique (20)',
   pinch: 'Pinch Pulgar-Índice activo',
+  pose_wrists: 'Muñecas del Esqueleto (Pose)',
+  pose_any: 'Cualquier punto del Cuerpo (Pose)',
 };
 
 export function computeContainBox(canvasW: number, canvasH: number, aspect: number): ViewportBox {
@@ -423,21 +425,50 @@ export class TriggerZoneEngine {
       let localY = 0;
       const hitPoints: Array<{ x: number; y: number }> = [];
 
-      for (const hand of frame.hands) {
-        if (zone.handFilter !== 'any' && hand.side !== zone.handFilter) continue;
-        const pts = getCandidatePoints(hand, zone.target);
-        for (const p of pts) {
-          const vx = mirrored ? 1 - p.x : p.x;
-          const vy = p.y;
-          const hit = hitTestZoneNormalized(zone, vx, vy, viewportAspect);
-          if (hit.inside) {
-            if (!inside) {
-              inside = true;
-              hitHand = hand.side;
-              localX = hit.localX;
-              localY = hit.localY;
+      if (zone.target === 'pose_wrists' || zone.target === 'pose_any') {
+        for (const pose of frame.poses ?? []) {
+          const candidates =
+            zone.target === 'pose_wrists'
+              ? [
+                  { pt: pose.landmarks[15], side: 'left' as HandSide },
+                  { pt: pose.landmarks[16], side: 'right' as HandSide },
+                ]
+              : pose.landmarks.map((pt) => ({ pt, side: null as HandSide | null }));
+
+          for (const item of candidates) {
+            if (!item.pt || (item.pt.visibility ?? 1) < 0.35) continue;
+            if (zone.handFilter !== 'any' && item.side && item.side !== zone.handFilter) continue;
+            const vx = mirrored ? 1 - item.pt.x : item.pt.x;
+            const vy = item.pt.y;
+            const hit = hitTestZoneNormalized(zone, vx, vy, viewportAspect);
+            if (hit.inside) {
+              if (!inside) {
+                inside = true;
+                hitHand = item.side;
+                localX = hit.localX;
+                localY = hit.localY;
+              }
+              hitPoints.push({ x: vx, y: vy });
             }
-            hitPoints.push({ x: vx, y: vy });
+          }
+        }
+      } else {
+        for (const hand of frame.hands) {
+          if (zone.handFilter !== 'any' && hand.side !== zone.handFilter) continue;
+          const pts = getCandidatePoints(hand, zone.target);
+          for (const p of pts) {
+            const vx = mirrored ? 1 - p.x : p.x;
+            const vy = p.y;
+            const hit = hitTestZoneNormalized(zone, vx, vy, viewportAspect);
+            if (hit.inside) {
+              if (!inside) {
+                inside = true;
+                hitHand = hand.side;
+                localX = hit.localX;
+                localY = hit.localY;
+              }
+              hitPoints.push({ x: vx, y: vy });
+            }
           }
         }
       }

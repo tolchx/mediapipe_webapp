@@ -1,13 +1,16 @@
 import type {
   FingerKey,
+  GestureDetectionFrame,
   HandKinematics,
   PhalanxKey,
+  PoseKinematics,
   SynthTelemetry,
   TrackingFrame,
   TriggerEvaluation,
   Vec3,
 } from '../types/hand';
 import { FINGER_SPECS } from './handKinematics';
+import { POSE_SKELETON_GROUPS } from './poseKinematics';
 import {
   computeContainBox,
   getZoneHandles,
@@ -28,6 +31,7 @@ export interface RenderOverlayOptions {
   showPhalanxAngles: boolean;
   showPitchGuides: boolean;
   showTriggers: boolean;
+  showPoseSkeleton: boolean;
   editTriggers: boolean;
   selectedTriggerId: string | null;
   hoveredTriggerId: string | null;
@@ -86,6 +90,7 @@ export function renderHandOverlay(
   frame: TrackingFrame,
   synth: SynthTelemetry,
   triggers: TriggerEvaluation[],
+  gestures: GestureDetectionFrame,
   options: RenderOverlayOptions
 ): void {
   const ctx = canvas.getContext('2d');
@@ -117,8 +122,22 @@ export function renderHandOverlay(
     drawPitchGuideRuler(ctx, box, synth);
   }
 
+  if (options.showPoseSkeleton) {
+    for (const pose of frame.poses) {
+      drawPoseSkeleton(ctx, pose, box, options);
+    }
+  }
+
   for (const hand of frame.hands) {
-    drawHand(ctx, hand, box, options);
+    const gestureLabel =
+      hand.side === 'left'
+        ? gestures.topLeft
+          ? `${gestures.topLeft.label} (${Math.round(gestures.topLeft.confidence * 100)}%)`
+          : null
+        : gestures.topRight
+          ? `${gestures.topRight.label} (${Math.round(gestures.topRight.confidence * 100)}%)`
+          : null;
+    drawHand(ctx, hand, box, options, gestureLabel);
   }
 
   ctx.restore();
@@ -333,11 +352,90 @@ function drawPitchGuideRuler(
   ctx.restore();
 }
 
+function drawPoseSkeleton(
+  ctx: CanvasRenderingContext2D,
+  pose: PoseKinematics,
+  box: ViewportBox,
+  options: RenderOverlayOptions
+): void {
+  const pts = pose.landmarks.map((p) => ({
+    ...projectPoint(p, box, options.mirrored),
+    vis: p.visibility ?? 1,
+  }));
+
+  const groupColors: Record<'torso' | 'left' | 'right' | 'head', string> = {
+    torso: 'rgba(167, 139, 250, 0.82)',
+    left: 'rgba(34, 211, 238, 0.72)',
+    right: 'rgba(251, 146, 60, 0.72)',
+    head: 'rgba(203, 213, 225, 0.55)',
+  };
+
+  ctx.save();
+  ctx.lineCap = 'round';
+
+  for (const grp of POSE_SKELETON_GROUPS) {
+    ctx.strokeStyle = groupColors[grp.group];
+    ctx.lineWidth = grp.group === 'torso' ? 3.2 : grp.group === 'head' ? 1.5 : 2.6;
+    for (const [a, b] of grp.pairs) {
+      const pA = pts[a];
+      const pB = pts[b];
+      if (!pA || !pB || pA.vis < 0.25 || pB.vis < 0.25) continue;
+      ctx.beginPath();
+      ctx.moveTo(pA.x, pA.y);
+      ctx.lineTo(pB.x, pB.y);
+      ctx.stroke();
+    }
+  }
+
+  for (let i = 0; i < pts.length; i++) {
+    const pt = pts[i];
+    if (pt.vis < 0.25) continue;
+    const isMajor = i === 0 || i === 11 || i === 12 || i === 13 || i === 14 || i === 15 || i === 16 || i === 23 || i === 24 || i === 25 || i === 26 || i === 27 || i === 28;
+    const r = isMajor ? 4.2 : 2.3;
+    ctx.fillStyle = '#070a0f';
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r + 1.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = i % 2 === 1 && i > 10 ? '#22d3ee' : i % 2 === 0 && i > 10 ? '#fb923c' : '#a78bfa';
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (options.showLandmarkIds && isMajor) {
+      ctx.fillStyle = '#ddd6fe';
+      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText(`P${i}`, pt.x + 6, pt.y - 4);
+    }
+  }
+
+  if (options.showPhalanxAngles) {
+    const angleBadges: Array<{ idx: number; deg: number }> = [
+      { idx: 13, deg: pose.angles.leftElbow },
+      { idx: 14, deg: pose.angles.rightElbow },
+      { idx: 25, deg: pose.angles.leftKnee },
+      { idx: 26, deg: pose.angles.rightKnee },
+    ];
+    ctx.font = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    for (const item of angleBadges) {
+      const pt = pts[item.idx];
+      if (!pt || pt.vis < 0.4) continue;
+      ctx.fillStyle = 'rgba(11, 14, 19, 0.78)';
+      ctx.fillRect(pt.x + 6, pt.y - 8, 32, 13);
+      ctx.fillStyle = '#ddd6fe';
+      ctx.fillText(`${Math.round(item.deg)}°`, pt.x + 8, pt.y + 2);
+    }
+  }
+
+  ctx.restore();
+}
+
 function drawHand(
   ctx: CanvasRenderingContext2D,
   hand: HandKinematics,
   box: ViewportBox,
-  options: RenderOverlayOptions
+  options: RenderOverlayOptions,
+  gestureLabel: string | null = null
 ): void {
   const isLeft = hand.side === 'left';
   const baseAccent = isLeft ? '#22d3ee' : '#fb923c';
@@ -468,6 +566,19 @@ function drawHand(
   ctx.fillStyle = baseAccent;
   ctx.textAlign = 'center';
   ctx.fillText(badgeLabel, palmPt.x, palmPt.y + 26);
+
+  if (gestureLabel) {
+    ctx.font = '600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const gW = ctx.measureText(gestureLabel).width + 14;
+    ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
+    ctx.strokeStyle = '#34d399';
+    ctx.beginPath();
+    ctx.roundRect(palmPt.x - gW / 2, palmPt.y + 36, gW, 18, 5);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#d1fae5';
+    ctx.fillText(gestureLabel, palmPt.x, palmPt.y + 49);
+  }
   ctx.textAlign = 'left';
 
   // Nombre corto en puntas cuando está extendido

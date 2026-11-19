@@ -4,6 +4,10 @@ export interface Vec3 {
   z: number;
 }
 
+export interface PoseLandmark extends Vec3 {
+  visibility?: number;
+}
+
 export type HandSide = 'left' | 'right';
 
 export type FingerKey = 'thumb' | 'index' | 'middle' | 'ring' | 'pinky';
@@ -69,7 +73,86 @@ export interface HandKinematics {
   pinches: Record<PinchTarget, PinchState>;
 }
 
+export interface PoseJointAngles {
+  leftElbow: number;
+  rightElbow: number;
+  leftShoulder: number;
+  rightShoulder: number;
+  leftHip: number;
+  rightHip: number;
+  leftKnee: number;
+  rightKnee: number;
+}
+
+export interface PoseTorsoMetrics {
+  forwardDeg: number;
+  lateralDeg: number;
+  twistDeg: number;
+}
+
+export interface PoseKinematics {
+  id: number;
+  landmarks: PoseLandmark[]; // 33 puntos normalizados [0..1]
+  worldLandmarks: PoseLandmark[]; // 33 puntos 3D en metros
+  centerOfMass: Vec3;
+  shoulderCenter: Vec3;
+  torsoLean: PoseTorsoMetrics;
+  angles: PoseJointAngles;
+  visibilityMean: number;
+}
+
+export interface RawRecognizedGesture {
+  side: HandSide;
+  categoryName: string;
+  score: number;
+}
+
+export type GestureSource = 'mediapipe' | 'hand_kinematic' | 'pose';
+
+export interface GestureDefinition {
+  id: string;
+  slug: string;
+  label: string;
+  description: string;
+  side: HandSide | 'body';
+  source: GestureSource;
+  oscAddress: string;
+}
+
+export interface GestureItem extends GestureDefinition {
+  enabled: boolean;
+  active: boolean;
+  confidence: number; // 0..1
+  hitCount: number;
+  lastTriggeredAt: number;
+}
+
+export interface GestureEventLogItem {
+  timestamp: number;
+  gestureId: string;
+  label: string;
+  side: HandSide | 'body';
+  confidence: number;
+  oscAddress: string;
+}
+
+export interface GestureSummary {
+  slug: string;
+  label: string;
+  confidence: number;
+}
+
+export interface GestureDetectionFrame {
+  items: GestureItem[];
+  topLeft: GestureSummary | null;
+  topRight: GestureSummary | null;
+  activeCount: number;
+  recentEvents: GestureEventLogItem[];
+}
+
 export type TrackingSourceMode = 'camera' | 'simulator';
+
+export type TrackingPipelineMode = 'both' | 'hands' | 'pose';
 
 export interface TrackingFrame {
   timestamp: number;
@@ -77,6 +160,8 @@ export interface TrackingFrame {
   hands: HandKinematics[];
   left: HandKinematics | null;
   right: HandKinematics | null;
+  poses: PoseKinematics[];
+  rawGestures: RawRecognizedGesture[];
 }
 
 export type SynthMappingMode = 'theremin' | 'pinch-pitch' | 'dual-hand';
@@ -146,6 +231,20 @@ export interface OscChannelGroups {
   triggerSubchannels: boolean;
 }
 
+export interface OscGesturesChannels {
+  sendTopGesture: boolean;
+  sendScores: boolean;
+  onlyActiveOrChanged: boolean;
+}
+
+export interface OscSkeletonChannels {
+  namedJoints: boolean;
+  angles: boolean;
+  torsoMetrics: boolean;
+  landmarks: boolean;
+  worldLandmarks: boolean;
+}
+
 export type TriggerShape = 'rect' | 'circle';
 
 export type TriggerMode = 'momentary' | 'pulse' | 'toggle';
@@ -159,7 +258,9 @@ export type TriggerTarget =
   | 'middle_tip'
   | 'ring_tip'
   | 'pinky_tip'
-  | 'pinch';
+  | 'pinch'
+  | 'pose_wrists'
+  | 'pose_any';
 
 export type TriggerHandFilter = 'any' | 'left' | 'right';
 
@@ -170,8 +271,8 @@ export interface TriggerZone {
   shape: TriggerShape;
   x: number; // 0..1 centro X en viewport visual
   y: number; // 0..1 centro Y en viewport visual
-  width: number; // 0.04..0.90 ancho normalizado (diámetro en círculo)
-  height: number; // 0.04..0.90 alto normalizado (ignorado/igualado en círculo)
+  width: number; // 0.04..0.96 ancho normalizado (diámetro en círculo)
+  height: number; // 0.04..0.96 alto normalizado (ignorado/igualado en círculo)
   mode: TriggerMode;
   pulseDurationMs: number;
   cooldownMs: number;
@@ -194,20 +295,45 @@ export interface TriggerEvaluation {
   hitPoints: Array<{ x: number; y: number }>; // puntos visuales en viewport [0..1]
 }
 
+export type OscModuleId = 'main' | 'gestures' | 'skeleton';
+
 export type OscSendMode = 'bundle' | 'individual';
 
-export interface OscConfig {
+export interface OscRouteConfig {
   enabled: boolean;
   host: string;
   port: number;
   sendMode: OscSendMode;
   rateHz: number; // 0 = sin límite (cada frame)
+}
+
+export interface OscConfig extends OscRouteConfig {
   channels: OscChannelGroups;
+}
+
+export interface OscGesturesConfig extends OscRouteConfig {
+  channels: OscGesturesChannels;
+}
+
+export interface OscSkeletonConfig extends OscRouteConfig {
+  channels: OscSkeletonChannels;
 }
 
 export interface OscMessageItem {
   address: string;
   args: Array<{ type: 'f' | 'i' | 's'; value: number | string }>;
+}
+
+export interface OscModuleStats {
+  targetHost: string;
+  targetPort: number;
+  sendMode: OscSendMode;
+  packetsSent: number;
+  messagesSent: number;
+  bytesSent: number;
+  packetsPerSec: number;
+  messagesPerSec: number;
+  lastError: string | null;
 }
 
 export interface OscStats {
@@ -223,6 +349,7 @@ export interface OscStats {
   packetsPerSec: number;
   messagesPerSec: number;
   lastError: string | null;
+  modules: Record<OscModuleId, OscModuleStats>;
 }
 
 export interface SimulatorControls {

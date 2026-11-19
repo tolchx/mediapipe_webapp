@@ -62,6 +62,11 @@
                 <span class="muted-text" id="handsDetectedBadge">0 manos detectadas</span>
               </div>
               <div class="toolbar-controls">
+                <select id="pipelineModeSelect" class="select-compact" title="Motores MediaPipe activos">
+                  <option value="both">Manos + Pose</option>
+                  <option value="hands">Solo Manos/Gestos</option>
+                  <option value="pose">Solo Esqueleto (Pose)</option>
+                </select>
                 <label class="toggle-chip">
                   <input type="checkbox" id="chkMirror" checked />
                   <span>Espejo</span>
@@ -69,6 +74,10 @@
                 <label class="toggle-chip">
                   <input type="checkbox" id="chkShowVideo" checked />
                   <span>Video</span>
+                </label>
+                <label class="toggle-chip">
+                  <input type="checkbox" id="chkShowPose" checked />
+                  <span>Esqueleto</span>
                 </label>
                 <label class="toggle-chip">
                   <input type="checkbox" id="chkShowAngles" checked />
@@ -115,6 +124,8 @@
                   <option value="ring_tip">Anular</option>
                   <option value="pinky_tip">Meñique</option>
                   <option value="pinch">Pinch</option>
+                  <option value="pose_wrists">Muñecas Pose</option>
+                  <option value="pose_any">Cuerpo Pose</option>
                 </select>
                 <button type="button" class="hud-btn" id="hudZoneDuplicate" title="Duplicar zona">⧉</button>
                 <button type="button" class="hud-btn hud-btn-del" id="hudZoneDelete" title="Eliminar zona">✕</button>
@@ -263,9 +274,15 @@
 
         <!-- COLUMNA DERECHA: INSPECTOR DE FALANGES, SONIDO Y OSC -->
         <aside class="inspector-column card">
-          <nav class="tab-bar" role="tablist">
+          <nav class="tab-bar tab-bar-6" role="tablist">
             <button type="button" class="tab-btn active" data-tab="kinematics">
               Dedos y Falanges
+            </button>
+            <button type="button" class="tab-btn" data-tab="skeleton">
+              Esqueleto (Pose)
+            </button>
+            <button type="button" class="tab-btn" data-tab="gestures">
+              Lista de Gestos
             </button>
             <button type="button" class="tab-btn" data-tab="triggers">
               Pulsadores (TD)
@@ -274,7 +291,7 @@
               Control Sonoro
             </button>
             <button type="button" class="tab-btn" data-tab="osc">
-              Protocolo OSC
+              OSC Principal
             </button>
           </nav>
 
@@ -320,7 +337,258 @@
               </div>
             </div>
 
-            <!-- TAB 2: PULSADORES OSC PARA TOUCHDESIGNER -->
+            <!-- TAB: ESQUELETO / POSE CUERPO COMPLETO + MODULO OSC INDEPENDIENTE -->
+            <div class="tab-panel" id="tab-skeleton">
+              <div class="hand-selector-bar">
+                <span class="pill-mini" id="poseStatusBadge">Sin cuerpo detectado</span>
+                <span class="pill-mini" id="poseVisBadge">Visibilidad 0%</span>
+              </div>
+
+              <div class="palm-summary-grid">
+                <div class="summary-cell">
+                  <span>Centro de Masa (Cadera)</span>
+                  <strong id="poseCenterText">—</strong>
+                </div>
+                <div class="summary-cell">
+                  <span>Inclinación Torso (F/L/G)</span>
+                  <strong id="poseLeanText">0° / 0° / 0°</strong>
+                </div>
+              </div>
+
+              <div class="section-block">
+                <h3>Ángulos Articulares del Esqueleto (33 Puntos)</h3>
+                <div class="pose-angles-grid" id="poseAnglesGrid"></div>
+              </div>
+
+              <div class="section-block">
+                <div class="triggers-header-row">
+                  <h3>Módulo OSC Esqueleto (Puerto Independiente)</h3>
+                  <span class="pill-mini" id="skelOscStatusPill">Puerto 9002</span>
+                </div>
+                <p class="hint-text">
+                  Envía exclusivamente el esqueleto corporal (<code>/pose/*</code>) hacia un puerto
+                  UDP separado del módulo principal y del módulo de gestos.
+                </p>
+
+                <div class="osc-target-row">
+                  <label class="field">
+                    <span>IP Destino Esqueleto</span>
+                    <input type="text" id="skelOscHost" value="127.0.0.1" placeholder="127.0.0.1" />
+                  </label>
+                  <label class="field field-port">
+                    <span>Puerto UDP</span>
+                    <input type="number" id="skelOscPort" value="9002" min="1" max="65535" />
+                  </label>
+                  <button type="button" class="btn btn-primary" id="btnApplySkelOsc">Aplicar</button>
+                </div>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Formato de Envío</span>
+                    <select id="skelOscSendMode">
+                      <option value="bundle">OSC Bundle (#bundle)</option>
+                      <option value="individual">Mensajes Individuales</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Tasa Máxima (Hz)</span>
+                    <select id="skelOscRateHz">
+                      <option value="60">60 Hz</option>
+                      <option value="30">30 Hz</option>
+                      <option value="15">15 Hz</option>
+                      <option value="0">Sin límite</option>
+                    </select>
+                  </label>
+                </div>
+
+                <label class="checkbox-row">
+                  <input type="checkbox" id="chkSkelOscEnabled" checked />
+                  <span>Transmisión OSC Esqueleto Activa</span>
+                </label>
+
+                <div class="channels-grid">
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkSkelChanJoints" checked />
+                    <span>13 Articulaciones Clave (<code>/pose/0/joint/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkSkelChanAngles" checked />
+                    <span>Ángulos Corporales (<code>/pose/0/angles</code>, <code>/angle/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkSkelChanTorso" checked />
+                    <span>Centro e Inclinación Torso (<code>/pose/0/center</code>, <code>/lean</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkSkelChanLandmarks" />
+                    <span>33 Landmarks 2D + Visibilidad (<code>/pose/0/landmark/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkSkelChanWorld" />
+                    <span>33 World Landmarks 3D en metros (<code>/pose/0/world_landmark/*</code>)</span>
+                  </label>
+                </div>
+
+                <div class="osc-stats-grid">
+                  <div class="summary-cell">
+                    <span>Mensajes / seg</span>
+                    <strong id="skelOscMsgRate">0 msg/s</strong>
+                  </div>
+                  <div class="summary-cell">
+                    <span>Paquetes UDP</span>
+                    <strong id="skelOscPacketsTotal">0</strong>
+                  </div>
+                </div>
+
+                <div class="osc-test-actions">
+                  <button type="button" class="btn btn-ghost" id="btnTestSkelOsc">
+                    Probar UDP Esqueleto
+                  </button>
+                </div>
+                <pre class="osc-test-log hidden" id="skelOscTestResult"></pre>
+              </div>
+
+              <div class="section-block">
+                <h3>Monitor OSC Esqueleto en Vivo</h3>
+                <div class="osc-monitor-table" id="skelOscMonitorList"></div>
+              </div>
+            </div>
+
+            <!-- TAB: LISTA DE GESTOS + MODULO OSC INDEPENDIENTE -->
+            <div class="tab-panel" id="tab-gestures">
+              <div class="hand-selector-bar">
+                <div class="segmented" role="group" aria-label="Filtro de gestos">
+                  <button type="button" class="seg-btn active" data-gfilter="all">Todos</button>
+                  <button type="button" class="seg-btn" data-gfilter="right">Der</button>
+                  <button type="button" class="seg-btn" data-gfilter="left">Izq</button>
+                  <button type="button" class="seg-btn" data-gfilter="body">Cuerpo</button>
+                </div>
+                <span class="pill-mini" id="gesturesActiveBadge">0 activos</span>
+              </div>
+
+              <div class="palm-summary-grid">
+                <div class="summary-cell">
+                  <span>Gesto Mano Izquierda</span>
+                  <strong id="topGestureLeftText">—</strong>
+                </div>
+                <div class="summary-cell">
+                  <span>Gesto Mano Derecha</span>
+                  <strong id="topGestureRightText">—</strong>
+                </div>
+              </div>
+
+              <div class="section-block">
+                <div class="triggers-header-row">
+                  <h3>Lista de Detección de Gestos</h3>
+                  <div class="triggers-actions-inline">
+                    <button type="button" class="btn btn-ghost btn-mini" id="btnGestEnableAll">
+                      Todos ON
+                    </button>
+                    <button type="button" class="btn btn-ghost btn-mini" id="btnGestDisableAll">
+                      Todos OFF
+                    </button>
+                  </div>
+                </div>
+                <p class="hint-text">
+                  Combina <strong>GestureRecognizer</strong> de MediaPipe, gestos 3D por falanges y
+                  gestos corporales de Pose. Marca qué gestos enviar por OSC.
+                </p>
+                <div class="gesture-list" id="gestureListContainer"></div>
+              </div>
+
+              <div class="section-block">
+                <div class="triggers-header-row">
+                  <h3>Módulo OSC Gestos (Puerto Independiente)</h3>
+                  <span class="pill-mini" id="gestOscStatusPill">Puerto 9001</span>
+                </div>
+                <p class="hint-text">
+                  Envía los gestos detectados (<code>/gestures/*</code>) hacia su propio puerto UDP
+                  separado del esqueleto y de las falanges.
+                </p>
+
+                <div class="osc-target-row">
+                  <label class="field">
+                    <span>IP Destino Gestos</span>
+                    <input type="text" id="gestOscHost" value="127.0.0.1" placeholder="127.0.0.1" />
+                  </label>
+                  <label class="field field-port">
+                    <span>Puerto UDP</span>
+                    <input type="number" id="gestOscPort" value="9001" min="1" max="65535" />
+                  </label>
+                  <button type="button" class="btn btn-primary" id="btnApplyGestOsc">Aplicar</button>
+                </div>
+
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Formato de Envío</span>
+                    <select id="gestOscSendMode">
+                      <option value="bundle">OSC Bundle (#bundle)</option>
+                      <option value="individual">Mensajes Individuales</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Tasa Máxima (Hz)</span>
+                    <select id="gestOscRateHz">
+                      <option value="30">30 Hz</option>
+                      <option value="60">60 Hz</option>
+                      <option value="15">15 Hz</option>
+                      <option value="0">Sin límite</option>
+                    </select>
+                  </label>
+                </div>
+
+                <label class="checkbox-row">
+                  <input type="checkbox" id="chkGestOscEnabled" checked />
+                  <span>Transmisión OSC Gestos Activa</span>
+                </label>
+
+                <div class="channels-grid">
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkGestChanTop" checked />
+                    <span>Gesto Principal por Mano (<code>/gestures/{side}/top</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkGestChanScores" checked />
+                    <span>Confianza por Gesto (<code>/gestures/{side}/score/*</code>)</span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="checkbox" id="chkGestChanOnlyActive" />
+                    <span>Enviar solo gestos activos (ahorrar tráfico)</span>
+                  </label>
+                </div>
+
+                <div class="osc-stats-grid">
+                  <div class="summary-cell">
+                    <span>Mensajes / seg</span>
+                    <strong id="gestOscMsgRate">0 msg/s</strong>
+                  </div>
+                  <div class="summary-cell">
+                    <span>Paquetes UDP</span>
+                    <strong id="gestOscPacketsTotal">0</strong>
+                  </div>
+                </div>
+
+                <div class="osc-test-actions">
+                  <button type="button" class="btn btn-ghost" id="btnTestGestOsc">
+                    Probar UDP Gestos
+                  </button>
+                </div>
+                <pre class="osc-test-log hidden" id="gestOscTestResult"></pre>
+              </div>
+
+              <div class="section-block">
+                <div class="triggers-header-row">
+                  <h3>Historial de Gestos &amp; Monitor OSC</h3>
+                  <button type="button" class="btn btn-ghost btn-mini" id="btnClearGestureEvents">
+                    Limpiar
+                  </button>
+                </div>
+                <div class="gesture-event-log" id="gestureEventLog"></div>
+                <div class="osc-monitor-table" id="gestOscMonitorList"></div>
+              </div>
+            </div>
+
+            <!-- TAB: PULSADORES OSC PARA TOUCHDESIGNER -->
             <div class="tab-panel" id="tab-triggers">
               <div class="section-block">
                 <div class="triggers-header-row">
@@ -386,6 +654,8 @@
                       <option value="ring_tip">Punta del Anular (16)</option>
                       <option value="pinky_tip">Punta del Meñique (20)</option>
                       <option value="pinch">Pinch Pulgar-Índice activo</option>
+                      <option value="pose_wrists">Muñecas del Esqueleto (Pose)</option>
+                      <option value="pose_any">Cualquier punto del Cuerpo (Pose)</option>
                     </select>
                   </label>
 
@@ -541,14 +811,18 @@
               </div>
             </div>
 
-            <!-- TAB 3: PROTOCOLO OSC -->
+            <!-- TAB: OSC PRINCIPAL (MANOS / SYNTH / PULSADORES) -->
             <div class="tab-panel" id="tab-osc">
               <div class="section-block">
-                <h3>Destino OSC sobre UDP</h3>
+                <div class="triggers-header-row">
+                  <h3>Módulo OSC Principal (Manos, Synth y Pulsadores)</h3>
+                  <span class="pill-mini" id="mainOscStatusPill">Puerto 9000</span>
+                </div>
                 <p class="hint-text">
-                  El navegador envía la telemetría por WebSocket al puente Node.js local, que la
-                  empaqueta en datagramas binarios <strong>OSC 1.0 UDP</strong> para TouchDesigner,
-                  Max/MSP, Pure Data, Ableton o SuperCollider.
+                  Transmite manos/falanges (<code>/hand/*</code>), sintetizador (<code>/synth/*</code>)
+                  y pulsadores (<code>/td/pad/*</code>). Los módulos <strong>Gestos</strong> (9001) y
+                  <strong>Esqueleto</strong> (9002) usan sus propios puertos independientes en sus
+                  respectivas pestañas.
                 </p>
 
                 <div class="osc-bridge-row hidden" id="oscBridgeRow">

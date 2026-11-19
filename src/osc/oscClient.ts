@@ -1,4 +1,12 @@
-import type { OscConfig, OscMessageItem, OscStats } from '../types/hand';
+import type {
+  OscConfig,
+  OscGesturesConfig,
+  OscMessageItem,
+  OscModuleId,
+  OscModuleStats,
+  OscSkeletonConfig,
+  OscStats,
+} from '../types/hand';
 
 export interface LoopbackTestResult {
   ok: boolean;
@@ -8,11 +16,29 @@ export interface LoopbackTestResult {
   error?: string;
 }
 
+function defaultModuleStats(port: number): OscModuleStats {
+  return {
+    targetHost: '127.0.0.1',
+    targetPort: port,
+    sendMode: 'bundle',
+    packetsSent: 0,
+    messagesSent: 0,
+    bytesSent: 0,
+    packetsPerSec: 0,
+    messagesPerSec: 0,
+    lastError: null,
+  };
+}
+
 export class OscBridgeClient {
   private ws: WebSocket | null = null;
   private reconnectTimer: number | null = null;
   private disposed = false;
-  private lastSentAt = 0;
+  private lastSentAtByModule: Record<OscModuleId, number> = {
+    main: 0,
+    gestures: 0,
+    skeleton: 0,
+  };
   private autoReconnect = true;
   private activeWsUrl: string | null = null;
 
@@ -33,6 +59,34 @@ export class OscBridgeClient {
     },
   };
 
+  private gesturesConfig: OscGesturesConfig = {
+    enabled: true,
+    host: '127.0.0.1',
+    port: 9001,
+    sendMode: 'bundle',
+    rateHz: 30,
+    channels: {
+      sendTopGesture: true,
+      sendScores: true,
+      onlyActiveOrChanged: false,
+    },
+  };
+
+  private skeletonConfig: OscSkeletonConfig = {
+    enabled: true,
+    host: '127.0.0.1',
+    port: 9002,
+    sendMode: 'bundle',
+    rateHz: 60,
+    channels: {
+      namedJoints: true,
+      angles: true,
+      torsoMetrics: true,
+      landmarks: false,
+      worldLandmarks: false,
+    },
+  };
+
   private stats: OscStats = {
     bridgeMode: 'connecting',
     wsConnected: false,
@@ -46,11 +100,18 @@ export class OscBridgeClient {
     packetsPerSec: 0,
     messagesPerSec: 0,
     lastError: null,
+    modules: {
+      main: defaultModuleStats(9000),
+      gestures: defaultModuleStats(9001),
+      skeleton: defaultModuleStats(9002),
+    },
   };
 
   private onStatsListeners: Array<(stats: OscStats) => void> = [];
   private onLoopbackListeners: Array<(res: LoopbackTestResult) => void> = [];
-  private onTestPacketListeners: Array<(info: { host: string; port: number; count: number }) => void> = [];
+  private onTestPacketListeners: Array<
+    (info: { module?: OscModuleId; host: string; port: number; count: number }) => void
+  > = [];
 
   connect(customWsUrl?: string): void {
     if (this.disposed) return;
@@ -164,6 +225,7 @@ export class OscBridgeClient {
       try {
         const data = JSON.parse(String(event.data));
         if (data.type === 'stats') {
+          const modulesPayload = data.modules ?? {};
           this.stats = {
             ...this.stats,
             bridgeMode: 'connected',
@@ -178,6 +240,11 @@ export class OscBridgeClient {
             packetsPerSec: data.packetsPerSec ?? 0,
             messagesPerSec: data.messagesPerSec ?? 0,
             lastError: data.lastError ?? null,
+            modules: {
+              main: { ...this.stats.modules.main, ...(modulesPayload.main ?? {}) },
+              gestures: { ...this.stats.modules.gestures, ...(modulesPayload.gestures ?? {}) },
+              skeleton: { ...this.stats.modules.skeleton, ...(modulesPayload.skeleton ?? {}) },
+            },
           };
           this.emitStats();
         } else if (data.type === 'loopback_result') {
@@ -235,8 +302,29 @@ export class OscBridgeClient {
     };
   }
 
+  getGesturesConfig(): OscGesturesConfig {
+    return {
+      ...this.gesturesConfig,
+      channels: { ...this.gesturesConfig.channels },
+    };
+  }
+
+  getSkeletonConfig(): OscSkeletonConfig {
+    return {
+      ...this.skeletonConfig,
+      channels: { ...this.skeletonConfig.channels },
+    };
+  }
+
   getStats(): OscStats {
-    return { ...this.stats };
+    return {
+      ...this.stats,
+      modules: {
+        main: { ...this.stats.modules.main },
+        gestures: { ...this.stats.modules.gestures },
+        skeleton: { ...this.stats.modules.skeleton },
+      },
+    };
   }
 
   updateConfig(partial: Partial<OscConfig>): void {
@@ -251,35 +339,85 @@ export class OscBridgeClient {
     this.pushConfigToServer();
   }
 
+  updateGesturesConfig(partial: Partial<OscGesturesConfig>): void {
+    this.gesturesConfig = {
+      ...this.gesturesConfig,
+      ...partial,
+      channels: {
+        ...this.gesturesConfig.channels,
+        ...(partial.channels ?? {}),
+      },
+    };
+    this.pushConfigToServer();
+  }
+
+  updateSkeletonConfig(partial: Partial<OscSkeletonConfig>): void {
+    this.skeletonConfig = {
+      ...this.skeletonConfig,
+      ...partial,
+      channels: {
+        ...this.skeletonConfig.channels,
+        ...(partial.channels ?? {}),
+      },
+    };
+    this.pushConfigToServer();
+  }
+
   private pushConfigToServer(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(
       JSON.stringify({
         type: 'config',
-        host: this.config.host,
-        port: this.config.port,
-        sendMode: this.config.sendMode,
+        modules: {
+          main: {
+            host: this.config.host,
+            port: this.config.port,
+            sendMode: this.config.sendMode,
+          },
+          gestures: {
+            host: this.gesturesConfig.host,
+            port: this.gesturesConfig.port,
+            sendMode: this.gesturesConfig.sendMode,
+          },
+          skeleton: {
+            host: this.skeletonConfig.host,
+            port: this.skeletonConfig.port,
+            sendMode: this.skeletonConfig.sendMode,
+          },
+        },
       })
     );
   }
 
-  sendBatch(messages: OscMessageItem[], nowMs: number, forceImmediate = false): boolean {
-    if (!this.config.enabled || messages.length === 0) return false;
+  sendBatch(
+    messages: OscMessageItem[],
+    nowMs: number,
+    forceImmediate = false,
+    moduleId: OscModuleId = 'main'
+  ): boolean {
+    const routeCfg =
+      moduleId === 'gestures'
+        ? this.gesturesConfig
+        : moduleId === 'skeleton'
+          ? this.skeletonConfig
+          : this.config;
+
+    if (!routeCfg.enabled || messages.length === 0) return false;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
 
-    if (!forceImmediate && this.config.rateHz > 0) {
-      const minInterval = 1000 / this.config.rateHz;
-      if (nowMs - this.lastSentAt < minInterval) return false;
+    if (!forceImmediate && routeCfg.rateHz > 0) {
+      const minInterval = 1000 / routeCfg.rateHz;
+      if (nowMs - this.lastSentAtByModule[moduleId] < minInterval) return false;
     }
 
-    this.lastSentAt = nowMs;
-    this.ws.send(JSON.stringify({ type: 'osc_batch', messages }));
+    this.lastSentAtByModule[moduleId] = nowMs;
+    this.ws.send(JSON.stringify({ type: 'osc_batch', module: moduleId, messages }));
     return true;
   }
 
-  sendTestPacket(): boolean {
+  sendTestPacket(moduleId: OscModuleId = 'main'): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-    this.ws.send(JSON.stringify({ type: 'send_test_packet' }));
+    this.ws.send(JSON.stringify({ type: 'send_test_packet', module: moduleId }));
     return true;
   }
 
@@ -297,7 +435,9 @@ export class OscBridgeClient {
     this.onLoopbackListeners.push(cb);
   }
 
-  onTestPacketSent(cb: (info: { host: string; port: number; count: number }) => void): void {
+  onTestPacketSent(
+    cb: (info: { module?: OscModuleId; host: string; port: number; count: number }) => void
+  ): void {
     this.onTestPacketListeners.push(cb);
   }
 
@@ -312,7 +452,6 @@ export class OscBridgeClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.ws?.close();
-    this.ws = null;
+    this.closeCurrentSocket();
   }
 }

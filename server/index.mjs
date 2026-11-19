@@ -17,7 +17,11 @@ const distDir = path.join(rootDir, 'dist');
 const PORT = Number(process.env.PORT || 3000);
 const DEFAULT_OSC_HOST = process.env.OSC_HOST || '127.0.0.1';
 const DEFAULT_OSC_PORT = Number(process.env.OSC_PORT || 9000);
+const DEFAULT_GESTURES_PORT = Number(process.env.OSC_GESTURES_PORT || 9001);
+const DEFAULT_SKELETON_PORT = Number(process.env.OSC_SKELETON_PORT || 9002);
 const MAX_BUNDLE_MESSAGES = 16;
+
+const MODULE_IDS = ['main', 'gestures', 'skeleton'];
 
 const app = express();
 app.use(express.json());
@@ -71,9 +75,10 @@ function sanitizeArg(arg) {
 }
 
 function toOscMessage(raw) {
-  const address = typeof raw?.address === 'string' && raw.address.startsWith('/')
-    ? raw.address
-    : '/hand/unknown';
+  const address =
+    typeof raw?.address === 'string' && raw.address.startsWith('/')
+      ? raw.address
+      : '/hand/unknown';
   const args = Array.isArray(raw?.args) ? raw.args.map(sanitizeArg) : [];
   return { address, args };
 }
@@ -87,24 +92,23 @@ function sendUdpBuffer(buffer, host, port) {
   });
 }
 
-async function dispatchOscMessages(messages, config, stats) {
+async function dispatchOscMessages(messages, routeConfig, modStats) {
   if (!messages.length) return;
 
-  if (config.sendMode === 'individual') {
+  if (routeConfig.sendMode === 'individual') {
     for (const raw of messages) {
       const packet = toOscMessage(raw);
       const bytes = Buffer.from(osc.writePacket(packet));
-      await sendUdpBuffer(bytes, config.host, config.port);
-      stats.packetsSent += 1;
-      stats.messagesSent += 1;
-      stats.bytesSent += bytes.length;
-      stats.windowPackets += 1;
-      stats.windowMessages += 1;
+      await sendUdpBuffer(bytes, routeConfig.host, routeConfig.port);
+      modStats.packetsSent += 1;
+      modStats.messagesSent += 1;
+      modStats.bytesSent += bytes.length;
+      modStats.windowPackets += 1;
+      modStats.windowMessages += 1;
     }
     return;
   }
 
-  // Bundle mode: chunk into <= MAX_BUNDLE_MESSAGES to stay safely under typical UDP MTU
   for (let i = 0; i < messages.length; i += MAX_BUNDLE_MESSAGES) {
     const chunk = messages.slice(i, i + MAX_BUNDLE_MESSAGES).map(toOscMessage);
     const bundle = {
@@ -112,12 +116,12 @@ async function dispatchOscMessages(messages, config, stats) {
       packets: chunk,
     };
     const bytes = Buffer.from(osc.writePacket(bundle));
-    await sendUdpBuffer(bytes, config.host, config.port);
-    stats.packetsSent += 1;
-    stats.messagesSent += chunk.length;
-    stats.bytesSent += bytes.length;
-    stats.windowPackets += 1;
-    stats.windowMessages += chunk.length;
+    await sendUdpBuffer(bytes, routeConfig.host, routeConfig.port);
+    modStats.packetsSent += 1;
+    modStats.messagesSent += chunk.length;
+    modStats.bytesSent += bytes.length;
+    modStats.windowPackets += 1;
+    modStats.windowMessages += chunk.length;
   }
 }
 
@@ -173,8 +177,12 @@ function runLoopbackTest() {
             args: [{ type: 'f', value: 37.5 }],
           },
           {
-            address: '/synth/frequency',
-            args: [{ type: 'f', value: 440.0 }],
+            address: '/gestures/right/active/victory',
+            args: [{ type: 'i', value: 1 }],
+          },
+          {
+            address: '/pose/0/angles',
+            args: [{ type: 'f', value: 145.0 }],
           },
         ],
       };
@@ -189,41 +197,140 @@ function runLoopbackTest() {
   });
 }
 
+function createModuleState(defaultPort) {
+  return {
+    config: {
+      host: DEFAULT_OSC_HOST,
+      port: defaultPort,
+      sendMode: 'bundle',
+    },
+    stats: {
+      packetsSent: 0,
+      messagesSent: 0,
+      bytesSent: 0,
+      windowPackets: 0,
+      windowMessages: 0,
+      lastError: null,
+    },
+  };
+}
+
+function normalizeModuleId(raw) {
+  return MODULE_IDS.includes(raw) ? raw : 'main';
+}
+
+function buildTestMessagesForModule(moduleId) {
+  if (moduleId === 'gestures') {
+    return [
+      { address: '/gestures/right/top', args: [{ type: 's', value: 'victory' }, { type: 'f', value: 0.95 }] },
+      { address: '/gestures/right/active/victory', args: [{ type: 'i', value: 1 }] },
+      { address: '/gestures/body/active/arms_up', args: [{ type: 'i', value: 0 }] },
+    ];
+  }
+  if (moduleId === 'skeleton') {
+    return [
+      { address: '/pose/detected', args: [{ type: 'i', value: 1 }] },
+      { address: '/pose/0/center', args: [{ type: 'f', value: 0.5 }, { type: 'f', value: 0.55 }, { type: 'f', value: 0.0 }] },
+      {
+        address: '/pose/0/angles',
+        args: [
+          { type: 'f', value: 150.0 },
+          { type: 'f', value: 148.0 },
+          { type: 'f', value: 45.0 },
+          { type: 'f', value: 46.0 },
+          { type: 'f', value: 175.0 },
+          { type: 'f', value: 175.0 },
+          { type: 'f', value: 176.0 },
+          { type: 'f', value: 176.0 },
+        ],
+      },
+    ];
+  }
+  return [
+    { address: '/hand/test/ping', args: [{ type: 'i', value: 1 }] },
+    { address: '/hand/right/phalanx/index/proximal/angle', args: [{ type: 'f', value: 45.0 }] },
+    { address: '/synth/frequency', args: [{ type: 'f', value: 440.0 }] },
+  ];
+}
+
 wss.on('connection', (ws) => {
-  const clientConfig = {
-    host: DEFAULT_OSC_HOST,
-    port: DEFAULT_OSC_PORT,
-    sendMode: 'bundle', // 'bundle' | 'individual'
+  const modules = {
+    main: createModuleState(DEFAULT_OSC_PORT),
+    gestures: createModuleState(DEFAULT_GESTURES_PORT),
+    skeleton: createModuleState(DEFAULT_SKELETON_PORT),
   };
 
-  const stats = {
-    packetsSent: 0,
-    messagesSent: 0,
-    bytesSent: 0,
-    windowPackets: 0,
-    windowMessages: 0,
-    lastError: null,
+  const applyConfigToModule = (moduleId, cfg) => {
+    const mod = modules[moduleId];
+    if (!mod || !cfg) return;
+    if (typeof cfg.host === 'string' && cfg.host.trim()) {
+      mod.config.host = cfg.host.trim();
+    }
+    const parsedPort = Number(cfg.port);
+    if (Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535) {
+      mod.config.port = parsedPort;
+    }
+    if (cfg.sendMode === 'bundle' || cfg.sendMode === 'individual') {
+      mod.config.sendMode = cfg.sendMode;
+    }
+    mod.stats.lastError = null;
   };
 
   const sendStats = () => {
     if (ws.readyState !== ws.OPEN) return;
+
+    const moduleSnapshots = {};
+    let totalPackets = 0;
+    let totalMessages = 0;
+    let totalBytes = 0;
+    let totalPacketsPerSec = 0;
+    let totalMessagesPerSec = 0;
+    let anyError = lastUdpError;
+
+    for (const id of MODULE_IDS) {
+      const m = modules[id];
+      const pps = m.stats.windowPackets * 2;
+      const mps = m.stats.windowMessages * 2;
+
+      moduleSnapshots[id] = {
+        targetHost: m.config.host,
+        targetPort: m.config.port,
+        sendMode: m.config.sendMode,
+        packetsSent: m.stats.packetsSent,
+        messagesSent: m.stats.messagesSent,
+        bytesSent: m.stats.bytesSent,
+        packetsPerSec: pps,
+        messagesPerSec: mps,
+        lastError: m.stats.lastError || lastUdpError,
+      };
+
+      totalPackets += m.stats.packetsSent;
+      totalMessages += m.stats.messagesSent;
+      totalBytes += m.stats.bytesSent;
+      totalPacketsPerSec += pps;
+      totalMessagesPerSec += mps;
+      if (!anyError && m.stats.lastError) anyError = m.stats.lastError;
+
+      m.stats.windowPackets = 0;
+      m.stats.windowMessages = 0;
+    }
+
     ws.send(
       JSON.stringify({
         type: 'stats',
         udpReady,
-        targetHost: clientConfig.host,
-        targetPort: clientConfig.port,
-        sendMode: clientConfig.sendMode,
-        packetsSent: stats.packetsSent,
-        messagesSent: stats.messagesSent,
-        bytesSent: stats.bytesSent,
-        packetsPerSec: stats.windowPackets * 2,
-        messagesPerSec: stats.windowMessages * 2,
-        lastError: stats.lastError || lastUdpError,
+        targetHost: modules.main.config.host,
+        targetPort: modules.main.config.port,
+        sendMode: modules.main.config.sendMode,
+        packetsSent: totalPackets,
+        messagesSent: totalMessages,
+        bytesSent: totalBytes,
+        packetsPerSec: totalPacketsPerSec,
+        messagesPerSec: totalMessagesPerSec,
+        lastError: anyError,
+        modules: moduleSnapshots,
       })
     );
-    stats.windowPackets = 0;
-    stats.windowMessages = 0;
   };
 
   const statsTimer = setInterval(sendStats, 500);
@@ -234,40 +341,37 @@ wss.on('connection', (ws) => {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'config') {
-        if (typeof msg.host === 'string' && msg.host.trim()) {
-          clientConfig.host = msg.host.trim();
+        if (msg.modules && typeof msg.modules === 'object') {
+          for (const id of MODULE_IDS) {
+            if (msg.modules[id]) applyConfigToModule(id, msg.modules[id]);
+          }
+        } else {
+          applyConfigToModule(normalizeModuleId(msg.module), msg);
         }
-        const parsedPort = Number(msg.port);
-        if (Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535) {
-          clientConfig.port = parsedPort;
-        }
-        if (msg.sendMode === 'bundle' || msg.sendMode === 'individual') {
-          clientConfig.sendMode = msg.sendMode;
-        }
-        stats.lastError = null;
         sendStats();
         return;
       }
 
       if (msg.type === 'osc_batch' && Array.isArray(msg.messages)) {
-        await dispatchOscMessages(msg.messages, clientConfig, stats);
-        stats.lastError = null;
+        const modId = normalizeModuleId(msg.module);
+        const mod = modules[modId];
+        await dispatchOscMessages(msg.messages, mod.config, mod.stats);
+        mod.stats.lastError = null;
         return;
       }
 
       if (msg.type === 'send_test_packet') {
-        const testMessages = [
-          { address: '/hand/test/ping', args: [{ type: 'i', value: 1 }] },
-          { address: '/hand/right/phalanx/index/proximal/angle', args: [{ type: 'f', value: 45.0 }] },
-          { address: '/synth/frequency', args: [{ type: 'f', value: 440.0 }] },
-        ];
-        await dispatchOscMessages(testMessages, clientConfig, stats);
-        stats.lastError = null;
+        const modId = normalizeModuleId(msg.module);
+        const mod = modules[modId];
+        const testMessages = buildTestMessagesForModule(modId);
+        await dispatchOscMessages(testMessages, mod.config, mod.stats);
+        mod.stats.lastError = null;
         ws.send(
           JSON.stringify({
             type: 'test_packet_sent',
-            host: clientConfig.host,
-            port: clientConfig.port,
+            module: modId,
+            host: mod.config.host,
+            port: mod.config.port,
             count: testMessages.length,
           })
         );
@@ -280,7 +384,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'loopback_result', ...result }));
       }
     } catch (err) {
-      stats.lastError = err.message;
+      modules.main.stats.lastError = err.message;
       if (ws.readyState === ws.OPEN) {
         ws.send(JSON.stringify({ type: 'error', message: err.message }));
       }
@@ -293,11 +397,14 @@ wss.on('connection', (ws) => {
 });
 
 app.get('/api/health', (_req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.json({
     ok: true,
     udpReady,
     defaultTargetHost: DEFAULT_OSC_HOST,
     defaultTargetPort: DEFAULT_OSC_PORT,
+    defaultGesturesPort: DEFAULT_GESTURES_PORT,
+    defaultSkeletonPort: DEFAULT_SKELETON_PORT,
     lastUdpError,
   });
 });
@@ -312,5 +419,7 @@ if (!process.env.DEV_MODE && fs.existsSync(path.join(distDir, 'index.html'))) {
 server.listen(PORT, () => {
   const modeLabel = process.env.DEV_MODE ? 'Bridge Dev' : 'Production';
   console.log(`[Server:${modeLabel}] Listening on http://localhost:${PORT}`);
-  console.log(`[OSC-UDP] Default target -> ${DEFAULT_OSC_HOST}:${DEFAULT_OSC_PORT}`);
+  console.log(
+    `[OSC-UDP] Default ports -> main:${DEFAULT_OSC_HOST}:${DEFAULT_OSC_PORT} | gestures:${DEFAULT_OSC_HOST}:${DEFAULT_GESTURES_PORT} | skeleton:${DEFAULT_OSC_HOST}:${DEFAULT_SKELETON_PORT}`
+  );
 });

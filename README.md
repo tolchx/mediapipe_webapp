@@ -1,21 +1,31 @@
-# HAND·OSC — MediaPipe Hand & Phalanx Tracking + OSC UDP + Control Sonoro
+# HAND·OSC — MediaPipe Manos, Gestos, Esqueleto Pose + OSC Multipuerto + Control Sonoro
 
-Aplicación web en tiempo real para rastrear **manos, dedos y cada falange individual** mediante **MediaPipe HandLandmarker** (`@mediapipe/tasks-vision`), transmitir los datos mediante el **protocolo OSC 1.0 sobre UDP** a través de un puente Node.js local y manipular frecuencias sonoras mediante gestos con un sintetizador **Web Audio API**.
+Aplicación web en tiempo real para rastrear **manos, dedos, falanges, gestos y esqueleto corporal completo** mediante **MediaPipe Tasks Vision** (`GestureRecognizer`, `HandLandmarker` y `PoseLandmarker`), transmitir cada flujo por **protocolo OSC 1.0 sobre UDP en puertos independientes** y manipular frecuencias sonoras mediante gestos con un sintetizador **Web Audio API**.
 
 ---
 
 ## Características principales
 
 - **Tracking de Manos, Dedos y Falanges (MediaPipe Tasks Vision autoalojado)**
-  - Detección de hasta **2 manos simultáneas** (`left` / `right`) y **21 landmarks 3D** por mano usando activos locales (`public/mediapipe/wasm` y `public/models/hand_landmarker.task`), con fallback automático `GPU → CPU`.
+  - Detección de hasta **2 manos simultáneas** (`left` / `right`) y **21 landmarks 3D** por mano usando activos locales (`public/mediapipe/wasm`, `gesture_recognizer.task` con fallback a `hand_landmarker.task`), con fallback automático `GPU → CPU`.
   - Cálculo cinemático 3D independiente de la distancia a cámara (basado en `worldLandmarks`) para las **3 falanges de cada dedo** (`proximal`, `intermediate`, `distal`): ángulo articular en grados (`°`) y flexión normalizada (`0..1`).
   - Cálculo de `curl` y extensión por dedo, separación entre dedos (`spread`), distancias de **Pinch** (`Pulgar` vs `Índice`, `Medio`, `Anular`, `Meñique`), centro de palma (`XYZ`), apertura global, velocidad y orientación (`pitch`, `yaw`, `roll`), con suavizado temporal EMA configurable.
   - **Simulador de Mano Virtual** integrado (`theremin_wave`, `pinch_sweep` y `manual`) para probar falanges, paquetes OSC y síntesis sonora sin necesidad de cámara física.
 
-- **Puente y Protocolo OSC 1.0 sobre UDP**
-  - El navegador envía la telemetría por WebSocket (`/osc`) al servidor Node.js ([server/index.mjs](server/index.mjs)), que empaqueta y transmite datagramas binarios **OSC 1.0 sobre UDP** hacia cualquier IP y puerto configurables en vivo (`127.0.0.1:9000` por defecto).
-  - Compatible con TouchDesigner, Max/MSP, Pure Data, Ableton Live, Resolume, SuperCollider y VCV Rack.
-  - Soporta modo **OSC Bundle** (`#bundle` atómico por frame en bloques de hasta 16 mensajes) o **Mensajes Individuales**, límite de tasa (`60 Hz`, `30 Hz`, `15 Hz` o nativo), filtrado por grupos de canales, monitor OSC en vivo y prueba integrada de **Loopback UDP**.
+- **Esqueleto Corporal Completo (`PoseLandmarker` · 33 puntos)**
+  - Detección simultánea de cuerpo completo (en modo `Manos + Pose`, `Solo Manos/Gestos` o `Solo Esqueleto`) usando `pose_landmarker_lite.task` con suavizado EMA configurable.
+  - Cálculo 3D de ángulos articulares (`Codos`, `Hombros`, `Caderas`, `Rodillas`), centro de masa (cadera), centro de hombros e inclinación/torsión del torso (`forwardDeg`, `lateralDeg`, `twistDeg`).
+
+- **Lista de Detección de Gestos (`GestureRecognizer` + Cinemática + Pose)**
+  - Combina los gestos nativos de MediaPipe (`Palma Abierta`, `Puño Cerrado`, `Índice Arriba`, `Victoria / Paz`, `Pulgar Arriba`, `Pulgar Abajo`, `Te Amo`), gestos biomecánicos por falanges/pinch (`Pinch Índice`, `Pinch Medio`, `Cuernos / Rock`) y gestos corporales (`Brazos Arriba`, `Pose en T`, `Manos Juntas`, `Sentadilla`).
+  - Lista filtrable por lado (`Todos`, `Der`, `Izq`, `Cuerpo`) con barras de confianza en vivo, activación individual por checkbox e historial de eventos disparados.
+
+- **Puente OSC 1.0 sobre UDP en 3 Módulos y Puertos Independientes**
+  - El navegador envía la telemetría por WebSocket (`/osc`) al servidor Node.js ([server/index.mjs](server/index.mjs)), que enruta datagramas binarios **OSC 1.0 sobre UDP** hacia **3 destinos independientes**:
+    - **Módulo Principal** (puerto `9000` por defecto): manos/falanges (`/hand/*`), sintetizador (`/synth/*`) y pulsadores (`/td/pad/*`).
+    - **Módulo Aparte — Gestos** (puerto `9001` por defecto): gestos detectados (`/gestures/*`).
+    - **Módulo Aparte — Esqueleto** (puerto `9002` por defecto): pose y articulaciones de cuerpo completo (`/pose/*`).
+  - Cada módulo tiene su propia IP destino, puerto UDP, modo (`OSC Bundle` o `Mensajes Individuales`), límite de tasa (`Hz`), prueba de envío y monitor OSC en vivo. Compatible con TouchDesigner, Max/MSP, Pure Data, Ableton Live, Resolume, SuperCollider y VCV Rack.
 
 - **Sistema de Pulsadores / Zonas Interactivas OSC para TouchDesigner (`Pulsadores (TD)`)**
   - Crea áreas rectangulares o circulares sobre el visor de cámara y edita su **posición (`X, Y`)**, **tamaño (`Ancho/Alto` o `Diámetro`)**, **dirección OSC personalizada** (ej. `/td/pad/1`), color y filtro de mano (`Cualquiera`, `Derecha`, `Izquierda`).
@@ -24,7 +34,7 @@ Aplicación web en tiempo real para rastrear **manos, dedos y cada falange indiv
     - **Pulso (`pulse`)**: dispara `1` durante una duración configurable (`40–1000 ms`) al ingresar al área y vuelve a `0`.
     - **Mantener (`momentary`)**: mantiene `1` mientras la mano o dedo permanezca dentro del área y vuelve a `0` al salir.
     - **Interruptor (`toggle`)**: alterna `0 ↔ 1` cada vez que el elemento ingresa al área.
-  - Selección del elemento detector: cualquier punto de la mano, centro de palma, cualquier punta de dedo, dedo específico (`Índice`, `Pulgar`, `Medio`, `Anular`, `Meñique`) o pinch activo.
+  - Selección del elemento detector: cualquier punto de la mano, centro de palma, cualquier punta de dedo, dedo específico (`Índice`, `Pulgar`, `Medio`, `Anular`, `Meñique`), pinch activo, muñecas del esqueleto Pose (`pose_wrists`) o cualquier punto del cuerpo Pose (`pose_any`).
 
 - **Ejemplo de Control Sonoro para Manipular Frecuencias**
   - Sintetizador polivalente basado en **Web Audio API** ([src/audio/synthEngine.ts](src/audio/synthEngine.ts)) con oscilador principal (`sine`, `triangle`, `sawtooth`, `square`), sub-oscilador (`-1` octava), modulador armónico FM, vibrato LFO, filtro paso bajo resonante, delay y compresor limitador.
@@ -65,7 +75,7 @@ Aplicación web en tiempo real para rastrear **manos, dedos y cada falange indiv
 ## Ejecución manual por consola
 
 ```bash
-# 1. Clonar e instalar dependencias (postinstall prepara WASM y descarga hand_landmarker.task)
+# 1. Clonar e instalar dependencias (postinstall prepara WASM y descarga los 3 modelos .task)
 git clone https://github.com/tolchx/mediapipe_webapp.git
 cd mediapipe_webapp
 npm install
@@ -85,21 +95,23 @@ npm start
 | `npm run dev` | Inicia el puente OSC (`3001`) y Vite (`5173`) simultáneamente |
 | `npm run build` | Verifica tipos TypeScript (`tsc --noEmit`) y compila en `dist/` |
 | `npm start` | Sirve la build de producción y el puente OSC en `http://localhost:3000` |
-| `npm test` | Ejecuta las pruebas de integración OSC UDP (`tests/osc-server.test.mjs`) |
-| `npm run osc:listen -- 9000` | Escucha e imprime en consola los paquetes OSC UDP en el puerto `9000` |
-| `npm run setup:assets` | Copia WASM de `@mediapipe/tasks-vision` y descarga `hand_landmarker.task` si falta |
+| `npm test` | Ejecuta todas las pruebas unitarias y de integración (`tests/*.test.mjs`) |
+| `npm run osc:listen` | Escucha e imprime paquetes OSC UDP en los puertos `9000`, `9001` y `9002` (o los puertos indicados en CLI, ej. `npm run osc:listen -- 9001 9002`) |
+| `npm run setup:assets` | Copia WASM local y descarga `hand_landmarker.task`, `gesture_recognizer.task` y `pose_landmarker_lite.task` si faltan |
 
 Variables de entorno opcionales para el servidor (`server/index.mjs`):
 - `PORT` (por defecto `3000`)
 - `OSC_HOST` (por defecto `127.0.0.1`)
-- `OSC_PORT` (por defecto `9000`)
+- `OSC_PORT` (puerto módulo principal, por defecto `9000`)
+- `OSC_GESTURES_PORT` (puerto módulo Gestos, por defecto `9001`)
+- `OSC_SKELETON_PORT` (puerto módulo Esqueleto/Pose, por defecto `9002`)
 
 ### Despliegue estático / Modo Web y Puente Local Opcional
 
 La compilación (`npm run build`) genera activos con rutas relativas (`base: './'` en [vite.config.ts](vite.config.ts)) e incluye [public/.htaccess](public/.htaccess) (MIME types `.wasm` / `.task`, `Permissions-Policy: camera=(self)`, CSP con soporte `wasm-unsafe-eval` y enrutamiento para subdirectorio `/mediapipeweb/`).
 
 - Si la webapp se sirve desde un hosting estático sin backend Node.js en el mismo origen, entra automáticamente en **Modo Web (Monitor local)** sin errores de reconexión: el tracking de MediaPipe, los pulsadores y el sintetizador Web Audio funcionan 100% en el navegador.
-- Desde la pestaña **Protocolo OSC**, puedes indicar la URL de un puente WebSocket local (por defecto `ws://127.0.0.1:3000/osc`) y pulsar **Conectar Puente** si deseas reenviar paquetes OSC UDP hacia TouchDesigner en tu máquina local mientras usas la versión web alojada online.
+- Desde la pestaña **OSC Principal**, puedes indicar la URL de un puente WebSocket local (por defecto `ws://127.0.0.1:3000/osc`) y pulsar **Conectar Puente** si deseas reenviar paquetes OSC UDP hacia TouchDesigner en tu máquina local mientras usas la versión web alojada online.
 
 ---
 
@@ -174,6 +186,29 @@ Por cada pulsador habilitado (con su dirección configurable `{oscAddress}`, por
 | `/synth/lfo_depth` | `f` | Profundidad de vibrato (`Hz`) |
 | `/synth/gain` | `f` | Ganancia de salida (`0..1`) |
 
+### Módulo Aparte: OSC Gestos (Puerto `9001` por defecto)
+| Dirección OSC | Tipos | Descripción |
+| :--- | :--- | :--- |
+| `/gestures/active_count` | `i` | Cantidad total de gestos activos en el frame |
+| `/gestures/{left\|right}/top` | `sf` | `(slug, confidence)` del gesto principal de cada mano |
+| `/gestures/{left\|right\|body}/active/{slug}` | `i` | `1` cuando el gesto está activo, `0` cuando no (`open_palm`, `closed_fist`, `pointing_up`, `victory`, `thumb_up`, `thumb_down`, `i_love_you`, `pinch_index`, `pinch_middle`, `rock_horns`, `arms_up`, `t_pose`, `hands_together`, `squat_crouch`) |
+| `/gestures/{left\|right\|body}/score/{slug}` | `f` | Nivel de confianza normalizado (`0..1`) |
+
+### Módulo Aparte: OSC Esqueleto / Pose (Puerto `9002` por defecto)
+| Dirección OSC | Tipos | Descripción |
+| :--- | :--- | :--- |
+| `/pose/detected` | `i` | `1` si se detecta un cuerpo, `0` si no |
+| `/pose/count` | `i` | Número de poses detectadas |
+| `/pose/0/center` | `fff` | Centro de masa (cadera) `(x, y, z)` |
+| `/pose/0/shoulder_center` | `fff` | Centro de hombros `(x, y, z)` |
+| `/pose/0/lean` | `fff` | Inclinación del torso `(forwardDeg, lateralDeg, twistDeg)` |
+| `/pose/0/visibility` | `f` | Visibilidad promedio del esqueleto (`0..1`) |
+| `/pose/0/angles` | `ffffffff` | 8 ángulos articulares en grados (`leftElbow`, `rightElbow`, `leftShoulder`, `rightShoulder`, `leftHip`, `rightHip`, `leftKnee`, `rightKnee`) |
+| `/pose/0/angle/{joint}` | `f` | Ángulo individual por articulación (`left_elbow`, `right_elbow`, `left_shoulder`, `right_shoulder`, `left_hip`, `right_hip`, `left_knee`, `right_knee`) |
+| `/pose/0/joint/{name}` | `ffff` | `(x, y, z, visibility)` de las 13 articulaciones principales (`nose`, `left_shoulder`, `right_shoulder`, `left_elbow`, `right_elbow`, `left_wrist`, `right_wrist`, `left_hip`, `right_hip`, `left_knee`, `right_knee`, `left_ankle`, `right_ankle`) |
+| `/pose/0/landmark/{0..32}` | `ffff` | Coordenadas normalizadas `(x, y, z, visibility)` *(canal opcional)* |
+| `/pose/0/world_landmark/{0..32}` | `ffff` | Coordenadas métricas 3D en metros `(x, y, z, visibility)` *(canal opcional)* |
+
 ---
 
 ## Edición directa de Pulsadores con el mouse
@@ -208,26 +243,29 @@ mediapipe_webapp/
 ├── abrir_webapp_mac.command    # Lanzador doble clic para macOS
 ├── scripts/
 │   ├── dev.mjs                 # Arranca puente OSC + servidor Vite en desarrollo
-│   └── setup-assets.mjs        # Copia WASM local y descarga hand_landmarker.task
+│   └── setup-assets.mjs        # Copia WASM local y descarga modelos MediaPipe (.task)
 ├── server/
-│   ├── index.mjs               # Servidor Express + WebSocket + puente OSC UDP
-│   └── osc-listen.mjs          # Monitor CLI para inspeccionar paquetes OSC UDP
+│   ├── index.mjs               # Servidor Express + WebSocket + puente OSC UDP multipuerto
+│   └── osc-listen.mjs          # Monitor CLI multipuerto para inspeccionar paquetes OSC UDP
 ├── src/
 │   ├── main.ts                 # Bucle principal, estado de UI y sincronización
 │   ├── styles.css              # Diseño de interfaz de estudio oscuro
-│   ├── types/hand.ts           # Tipos compartidos (falanges, OSC, synth)
+│   ├── types/hand.ts           # Tipos compartidos (manos, pose, gestos, OSC, synth)
 │   ├── vision/
-│   │   ├── handTracker.ts      # Wrapper de MediaPipe HandLandmarker + simulador
+│   │   ├── handTracker.ts      # GestureRecognizer, HandLandmarker, PoseLandmarker y simulador
 │   │   ├── handKinematics.ts   # Cálculo 3D de falanges, ángulos, pinch y palma
-│   │   ├── handRenderer.ts     # Renderizado del esqueleto, falanges y pulsadores
+│   │   ├── poseKinematics.ts   # Cálculo 3D del esqueleto corporal (33 puntos y ángulos)
+│   │   ├── gestureEngine.ts    # Lista unificada de gestos nativos, 3D y de pose
+│   │   ├── handRenderer.ts     # Renderizado de pose, manos, falanges, gestos y pulsadores
 │   │   └── triggerZones.ts     # Motor de zonas/pulsadores (pulso, mantener, toggle)
 │   ├── audio/
 │   │   ├── synthEngine.ts      # Sintetizador Web Audio controlado por gestos
 │   │   └── audioVisualizer.ts  # Visualizador FFT de espectro + osciloscopio
 │   └── osc/
-│       ├── oscClient.ts        # Cliente WebSocket hacia el puente OSC UDP
-│       └── oscProtocol.ts      # Serializador de frames y pulsadores a mensajes OSC
+│       ├── oscClient.ts        # Cliente WebSocket multipuerto hacia el puente OSC UDP
+│       └── oscProtocol.ts      # Serializadores OSC independientes (Principal, Gestos, Pose)
 └── tests/
     ├── osc-server.test.mjs     # Test de integración WebSocket -> OSC UDP
+    ├── pose-gestures.test.mjs  # Tests de esqueleto Pose, gestos y ruteo multipuerto
     └── trigger-zones.test.mjs  # Tests unitarios de pulsadores y serialización OSC
 ```
