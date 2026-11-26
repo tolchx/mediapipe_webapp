@@ -44,6 +44,13 @@ import {
   buildSkeletonOscMessages,
   formatOscMessagePreview,
 } from './osc/oscProtocol';
+import {
+  HandBlobSystem,
+  type BlobColorMode,
+  type BlobEmitterMode,
+  type HandBlob,
+} from './vision/handBlobSystem';
+import { FluidSimulationEngine } from './visuals/fluidSimulation';
 
 const FINGER_KEYS: FingerKey[] = ['thumb', 'index', 'middle', 'ring', 'pinky'];
 const PHALANX_KEYS: PhalanxKey[] = ['proximal', 'intermediate', 'distal'];
@@ -62,6 +69,9 @@ class HandOscApp {
   private visualizer = new AudioVisualizer();
   private oscClient = new OscBridgeClient();
   private triggerEngine = new TriggerZoneEngine();
+  private blobSystem = new HandBlobSystem();
+  private fluidEngine: FluidSimulationEngine | null = null;
+  private activeTab = 'kinematics';
 
   private sourceMode: TrackingSourceMode = 'camera';
   private cameraActive = false;
@@ -503,11 +513,17 @@ class HandOscApp {
     const tabPanels = document.querySelectorAll<HTMLElement>('.tab-panel');
     tabButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
-        const target = btn.dataset.tab;
+        const target = btn.dataset.tab ?? 'kinematics';
+        this.activeTab = target;
         tabButtons.forEach((b) => b.classList.toggle('active', b === btn));
         tabPanels.forEach((p) => p.classList.toggle('active', p.id === `tab-${target}`));
+        if (target === 'fluid') {
+          this.ensureFluidEngine();
+        }
       });
     });
+
+    this.bindFluidControls();
 
     // Fuente: Cámara vs Simulador
     this.btnSourceCamera.addEventListener('click', () => this.setSourceMode('camera'));
@@ -1787,6 +1803,17 @@ class HandOscApp {
       synthTelemetry
     );
 
+    // 3b. Fluid Simulation + Hand Blob System (cuando la pestaña Fluidos está activa)
+    let activeBlobs: HandBlob[] = [];
+    if (this.activeTab === 'fluid') {
+      this.ensureFluidEngine();
+      activeBlobs = this.blobSystem.processFrame(frame, effectiveMirrored);
+      if (this.fluidEngine) {
+        this.fluidEngine.applyBlobs(activeBlobs);
+        this.fluidEngine.stepAndRender(nowMs);
+      }
+    }
+
     // 4. OSC TX en 3 módulos independientes (Principal :9000, Gestos :9001, Esqueleto :9002)
     let triggerEdge = false;
     for (const ev of triggers) {
@@ -1829,6 +1856,9 @@ class HandOscApp {
     if (nowMs - this.lastUiTelemetryTime >= 32) {
       this.lastUiTelemetryTime = nowMs;
       this.updateTelemetryDom(frame, synthTelemetry, triggers, gestures);
+      if (this.activeTab === 'fluid') {
+        this.updateFluidBlobTelemetry(activeBlobs);
+      }
     }
 
     if (nowMs - this.lastOscMonitorTime >= 110) {
@@ -2115,6 +2145,189 @@ class HandOscApp {
     }
 
     container.replaceChildren(frag);
+  }
+
+  private ensureFluidEngine(): void {
+    if (this.fluidEngine) return;
+    const canvas = document.getElementById('fluidCanvas') as HTMLCanvasElement | null;
+    if (!canvas || canvas.clientWidth === 0 || canvas.clientHeight === 0) return;
+    try {
+      this.fluidEngine = new FluidSimulationEngine(canvas);
+    } catch (err) {
+      console.error('[FluidSimulation] Error inicializando WebGL:', err);
+    }
+  }
+
+  private bindFluidControls(): void {
+    const stageCard = byId<HTMLElement>('fluidStageCard');
+    const btnSplats = byId<HTMLButtonElement>('btnFluidSplats');
+    const btnClear = byId<HTMLButtonElement>('btnFluidClear');
+    const btnPause = byId<HTMLButtonElement>('btnFluidPause');
+    const btnFullscreen = byId<HTMLButtonElement>('btnFluidFullscreen');
+
+    btnSplats.addEventListener('click', () => {
+      this.ensureFluidEngine();
+      this.fluidEngine?.multipleSplats(Math.floor(Math.random() * 10) + 6);
+    });
+
+    btnClear.addEventListener('click', () => {
+      this.fluidEngine?.clear();
+    });
+
+    btnPause.addEventListener('click', () => {
+      if (!this.fluidEngine) return;
+      const nextPaused = !this.fluidEngine.getConfig().PAUSED;
+      this.fluidEngine.updateConfig({ PAUSED: nextPaused });
+      btnPause.textContent = nextPaused ? 'Reanudar' : 'Pausa';
+      btnPause.classList.toggle('is-active', nextPaused);
+    });
+
+    btnFullscreen.addEventListener('click', () => {
+      if (document.fullscreenElement === stageCard) {
+        void document.exitFullscreen();
+      } else {
+        void stageCard.requestFullscreen?.();
+      }
+    });
+
+    // Blob System controls
+    const chkBlobsEnabled = byId<HTMLInputElement>('chkBlobsEnabled');
+    const selEmitterMode = byId<HTMLSelectElement>('blobEmitterMode');
+    const selColorMode = byId<HTMLSelectElement>('blobColorMode');
+    const rngBlobForce = byId<HTMLInputElement>('rngBlobForce');
+    const blobForceVal = byId<HTMLElement>('blobForceVal');
+    const rngBlobRadius = byId<HTMLInputElement>('rngBlobRadius');
+    const blobRadiusVal = byId<HTMLElement>('blobRadiusVal');
+    const rngBlobThreshold = byId<HTMLInputElement>('rngBlobThreshold');
+    const blobThresholdVal = byId<HTMLElement>('blobThresholdVal');
+    const chkBlobIdleEmit = byId<HTMLInputElement>('chkBlobIdleEmit');
+    const chkBlobPinchBoost = byId<HTMLInputElement>('chkBlobPinchBoost');
+
+    chkBlobsEnabled.addEventListener('change', () => {
+      this.blobSystem.updateConfig({ enabled: chkBlobsEnabled.checked });
+    });
+    selEmitterMode.addEventListener('change', () => {
+      this.blobSystem.updateConfig({ emitterMode: selEmitterMode.value as BlobEmitterMode });
+    });
+    selColorMode.addEventListener('change', () => {
+      this.blobSystem.updateConfig({ colorMode: selColorMode.value as BlobColorMode });
+    });
+    rngBlobForce.addEventListener('input', () => {
+      const v = Number(rngBlobForce.value);
+      blobForceVal.textContent = `${v.toFixed(2)}x`;
+      this.blobSystem.updateConfig({ forceMultiplier: v });
+    });
+    rngBlobRadius.addEventListener('input', () => {
+      const v = Number(rngBlobRadius.value);
+      blobRadiusVal.textContent = `${v.toFixed(2)}x`;
+      this.blobSystem.updateConfig({ radiusScale: v });
+    });
+    rngBlobThreshold.addEventListener('input', () => {
+      const v = Number(rngBlobThreshold.value);
+      blobThresholdVal.textContent = v.toFixed(4);
+      this.blobSystem.updateConfig({ minSpeedThreshold: v });
+    });
+    chkBlobIdleEmit.addEventListener('change', () => {
+      this.blobSystem.updateConfig({ emitWhenIdle: chkBlobIdleEmit.checked });
+    });
+    chkBlobPinchBoost.addEventListener('change', () => {
+      this.blobSystem.updateConfig({ pinchBoost: chkBlobPinchBoost.checked });
+    });
+
+    // Fluid Shader controls
+    const rngDensity = byId<HTMLInputElement>('rngFluidDensity');
+    const fluidDensityVal = byId<HTMLElement>('fluidDensityVal');
+    const rngVelocity = byId<HTMLInputElement>('rngFluidVelocity');
+    const fluidVelocityVal = byId<HTMLElement>('fluidVelocityVal');
+    const rngCurl = byId<HTMLInputElement>('rngFluidCurl');
+    const fluidCurlVal = byId<HTMLElement>('fluidCurlVal');
+    const rngSplatRadius = byId<HTMLInputElement>('rngFluidSplatRadius');
+    const fluidSplatRadiusVal = byId<HTMLElement>('fluidSplatRadiusVal');
+    const chkShading = byId<HTMLInputElement>('chkFluidShading');
+    const chkBloom = byId<HTMLInputElement>('chkFluidBloom');
+    const chkSunrays = byId<HTMLInputElement>('chkFluidSunrays');
+
+    rngDensity.addEventListener('input', () => {
+      const v = Number(rngDensity.value);
+      fluidDensityVal.textContent = v.toFixed(2);
+      this.fluidEngine?.updateConfig({ DENSITY_DISSIPATION: v });
+    });
+    rngVelocity.addEventListener('input', () => {
+      const v = Number(rngVelocity.value);
+      fluidVelocityVal.textContent = v.toFixed(2);
+      this.fluidEngine?.updateConfig({ VELOCITY_DISSIPATION: v });
+    });
+    rngCurl.addEventListener('input', () => {
+      const v = Number(rngCurl.value);
+      fluidCurlVal.textContent = String(Math.round(v));
+      this.fluidEngine?.updateConfig({ CURL: v });
+    });
+    rngSplatRadius.addEventListener('input', () => {
+      const v = Number(rngSplatRadius.value);
+      fluidSplatRadiusVal.textContent = v.toFixed(2);
+      this.fluidEngine?.updateConfig({ SPLAT_RADIUS: v });
+    });
+    chkShading.addEventListener('change', () => {
+      this.fluidEngine?.updateConfig({ SHADING: chkShading.checked });
+    });
+    chkBloom.addEventListener('change', () => {
+      this.fluidEngine?.updateConfig({ BLOOM: chkBloom.checked });
+    });
+    chkSunrays.addEventListener('change', () => {
+      this.fluidEngine?.updateConfig({ SUNRAYS: chkSunrays.checked });
+    });
+  }
+
+  private updateFluidBlobTelemetry(blobs: HandBlob[]): void {
+    const badge = document.getElementById('fluidBlobCountBadge');
+    const overlay = document.getElementById('fluidBlobOverlay');
+    const monitor = document.getElementById('fluidBlobMonitor');
+    if (!badge || !overlay || !monitor) return;
+
+    const activeCount = blobs.filter((b) => b.active).length;
+    badge.textContent = `${activeCount}/${blobs.length} blobs`;
+
+    // Dots visuales sobre el canvas de fluidos
+    const dotFrag = document.createDocumentFragment();
+    for (const blob of blobs) {
+      const dot = document.createElement('div');
+      dot.className = `fluid-blob-dot${blob.side === 'left' ? ' is-left' : ''}${blob.active ? '' : ' is-idle'}`;
+      dot.style.left = `${(blob.x * 100).toFixed(2)}%`;
+      dot.style.top = `${(blob.y * 100).toFixed(2)}%`;
+      dotFrag.appendChild(dot);
+    }
+    overlay.replaceChildren(dotFrag);
+
+    // Tabla de telemetría de blobs
+    if (blobs.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'hint-text';
+      empty.textContent = 'Muestra una mano o activa el Simulador para generar blobs.';
+      monitor.replaceChildren(empty);
+      return;
+    }
+
+    const rowFrag = document.createDocumentFragment();
+    for (const blob of blobs) {
+      const row = document.createElement('div');
+      row.className = 'osc-msg-row';
+
+      const name = document.createElement('span');
+      name.className = 'osc-addr';
+      name.textContent = blob.label;
+
+      const state = document.createElement('span');
+      state.className = 'osc-type';
+      state.textContent = blob.active ? 'ACTIVO' : 'IDLE';
+
+      const coords = document.createElement('span');
+      coords.className = 'osc-vals';
+      coords.textContent = `(${blob.x.toFixed(2)}, ${blob.y.toFixed(2)}) v=${blob.speed.toFixed(4)}`;
+
+      row.append(name, state, coords);
+      rowFrag.appendChild(row);
+    }
+    monitor.replaceChildren(rowFrag);
   }
 
   dispose(): void {

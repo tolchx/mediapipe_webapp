@@ -672,12 +672,18 @@ input[type='number']:focus {
   grid-template-columns: repeat(3, 1fr);
 }
 
-.tab-bar.tab-bar-6 .tab-btn {
+.tab-bar.tab-bar-7 {
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+}
+
+.tab-bar.tab-bar-6 .tab-btn,
+.tab-bar.tab-bar-7 .tab-btn {
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   padding: 8px 6px;
 }
 
-.tab-bar.tab-bar-6 .tab-btn.active {
+.tab-bar.tab-bar-6 .tab-btn.active,
+.tab-bar.tab-bar-7 .tab-btn.active {
   box-shadow: inset 0 -2px 0 var(--accent-left);
 }
 
@@ -1372,6 +1378,103 @@ input[type='color'] {
   border-radius: 4px;
   background: var(--bg-inset);
   color: var(--accent-audio);
+}
+
+/* FLUIDOS WEBGL + BLOBS */
+.fluid-stage-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: #070a0f;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.fluid-stage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.fluid-stage-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fluid-stage-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fluid-canvas-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  min-height: 220px;
+  background: #070a0f;
+  overflow: hidden;
+}
+
+#fluidCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.fluid-blob-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.fluid-blob-dot {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #22d3ee;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.6);
+  opacity: 0.85;
+  transition: opacity 0.08s ease;
+}
+
+.fluid-blob-dot.is-left {
+  border-color: #fb7185;
+  box-shadow: 0 0 10px rgba(251, 113, 133, 0.6);
+}
+
+.fluid-blob-dot.is-idle {
+  opacity: 0.3;
+  transform: translate(-50%, -50%) scale(0.75);
+}
+
+.fluid-toggles-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.fluid-stage-card:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+}
+
+.fluid-stage-card:fullscreen .fluid-canvas-wrap {
+  flex: 1;
+  aspect-ratio: auto;
+  height: 100%;
 }
 
 /* RESPONSIVE */
